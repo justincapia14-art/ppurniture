@@ -1,17 +1,77 @@
 import {
-  ADMIN_MESSENGER_PLACEHOLDER_URL,
   computeVariantPricing,
+  filterCatalogPageItems,
   filterFurnitureItems,
   formatCustomerProductDisplay,
   formatSimplifiedProductCardData,
+  getColorFilterCounts,
   getProductStockStatus,
   getRecommendedBestSellers,
   resolveCustomerAvatarState,
   validateAndBuildOfferProposal,
+  validateVoucherForOrder,
 } from './store.js';
 
 const API_ENDPOINT = window.location.pathname.includes('/src/') ? 'api.php' : 'src/api.php';
 const FRIENDLY_CUSTOMER_STEPS = ['Order Confirmed', 'In Workshop Production', 'Quality Check', 'Ready / Delivered'];
+
+const HERO_TAB_COPY = {
+  flagship: {
+    eyebrow: 'Lillia and Rowena Furniture · Handcrafted Collection',
+    headline: 'Handcrafted Solid Wood & Custom Furniture for Every Room.',
+    description:
+      'Explore solid American black walnut tables, Belgian bouclé sofas, and honed Roman travertine pieces—or request a custom furniture design tailored to your space.',
+    price: '$1,180',
+    ctaText: 'Shop Living Room',
+    ctaCategory: 'living',
+    cardTitle: 'Living Room Collection',
+    image: 'assets/images/hero_living_room_atelier.jpg',
+  },
+  living: {
+    eyebrow: 'Living Room Collection · Tailored Bouclé & Travertine',
+    headline: 'Sculpted Lounge Seating & Architectural Plinth Tables.',
+    description:
+      'Low-slung Belgian bouclé sectionals, kiln-dried white oak lounge chairs, and monolithic travertine coffee tables.',
+    price: '$1,680',
+    ctaText: 'Explore Living Room',
+    ctaCategory: 'living',
+    cardTitle: 'Living Room Sanctuary',
+    image: 'assets/images/category_living_lounge.jpg',
+  },
+  dining: {
+    eyebrow: 'Dining Room Collection · Solid American Black Walnut',
+    headline: 'Monolithic Timber Dining Tables Built for Generations.',
+    description:
+      'Book-matched solid walnut slabs with hand-cut butterfly joinery and Danish paper-cord dining chairs.',
+    price: '$1,290',
+    ctaText: 'Explore Dining Room',
+    ctaCategory: 'dining',
+    cardTitle: 'Dining Room Atelier',
+    image: 'assets/images/category_dining_tables.jpg',
+  },
+  bedroom: {
+    eyebrow: 'Bedroom Sanctuary · Belgian Linen & Solid Ash',
+    headline: 'Restful Architectural Beds & Cantilevered Nightstands.',
+    description:
+      'Upholstered platform beds in raw Belgian linen paired with floating solid timber bedside tables.',
+    price: '$1,180',
+    ctaText: 'Explore Bedroom',
+    ctaCategory: 'bedroom',
+    cardTitle: 'Bedroom Collection',
+    image: 'assets/images/category_bedroom_sanctuary.jpg',
+  },
+  office: {
+    eyebrow: 'Study & Work Desks · Executive Millwork',
+    headline: 'Precision Architect Desks & Fluted Credenzas.',
+    description:
+      'Concealed cable management, solid walnut work surfaces, and acoustic tambour storage cabinets.',
+    price: '$2,150',
+    ctaText: 'Explore Study Desks',
+    ctaCategory: 'office',
+    cardTitle: 'Study & Work Desks',
+    image: 'assets/images/category_office_storage.jpg',
+  },
+};
 
 const state = {
   categories: [
@@ -42,6 +102,8 @@ const state = {
   searchQuery: '',
   catalogPageCategory: 'all',
   catalogPageSearch: '',
+  catalogPageMaxPrice: 5500,
+  catalogPageColor: '',
   catalogPageStock: 'all',
   catalogPageSort: 'featured',
   selectedColorByProduct: {},
@@ -69,22 +131,6 @@ const state = {
   adminInventoryStockFilter: 'all',
   adminInventoryPage: 1,
   adminInventoryPageSize: 5,
-  adminMovementFormOpen: false,
-  adminMovementMode: 'Stock In',
-  adminMovementMaterialId: 'mat-walnut-slab',
-  adminMovementProductId: 'mat-walnut-slab',
-  adminMovementQuantity: '10',
-  adminMovementPurchaseCost: '',
-  adminMovementReason: 'Workshop Production Allocation',
-  adminMovementCustomReason: '',
-  adminMovementDate: new Date().toISOString().slice(0, 10),
-  adminMaterialFormOpen: false,
-  adminEditingMaterialId: '',
-  adminHistoryModalOpen: false,
-  adminHistoryMaterialId: 'all',
-  adminInventoryHistoryTypeFilter: 'all',
-  adminInventoryHistorySearch: '',
-  adminOpenActionMenuId: '',
   adminOrderSearch: '',
   adminOrderStage: 'all',
   adminCustomerSearch: '',
@@ -109,16 +155,30 @@ const usd = (amount) =>
     Number(amount) || 0
   );
 
+function cloneTemplate(templateId) {
+  const tpl = document.getElementById(templateId);
+  return tpl && tpl.content && tpl.content.firstElementChild
+    ? tpl.content.firstElementChild.cloneNode(true)
+    : null;
+}
+
+function setRoleText(root, role, text) {
+  const el = root?.querySelector(`[data-role="${role}"]`);
+  if (el) el.textContent = text;
+  return el;
+}
+
 function syncCustomerAvatarDOM(profileLike) {
   const avatarState = resolveCustomerAvatarState(profileLike || state.customerProfile);
   [
-    ['nav-user-avatar-img', 'nav-user-initials'],
-    ['portal-header-avatar-img', 'portal-header-initials'],
+    ['nav-profile-avatar-img', 'nav-profile-default-icon'],
+    ['portal-header-avatar-img', 'portal-header-default-icon'],
     ['client-sidebar-avatar-img', 'client-sidebar-initials'],
-    ['client-profile-avatar-img', 'client-profile-avatar-initials'],
-  ].forEach(([imgId, initId]) => {
+    ['client-welcome-avatar-img', 'client-welcome-avatar-initials'],
+    ['client-profile-avatar-preview', 'client-profile-avatar-initials'],
+  ].forEach(([imgId, fallbackId]) => {
     const imgEl = document.getElementById(imgId);
-    const initEl = document.getElementById(initId);
+    const fallbackEl = document.getElementById(fallbackId);
     if (imgEl) {
       if (avatarState.hasAvatar) {
         imgEl.src = avatarState.avatarSrc;
@@ -128,9 +188,9 @@ function syncCustomerAvatarDOM(profileLike) {
         imgEl.classList.add('hidden');
       }
     }
-    if (initEl) {
-      initEl.textContent = avatarState.initials;
-      initEl.classList.toggle('hidden', avatarState.hasAvatar);
+    if (fallbackEl) {
+      if (fallbackEl.tagName !== 'svg') fallbackEl.textContent = avatarState.initials;
+      fallbackEl.classList.toggle('hidden', avatarState.hasAvatar);
     }
   });
   const clearBtn = document.getElementById('client-profile-avatar-clear-btn');
@@ -141,21 +201,11 @@ function syncCustomerAvatarDOM(profileLike) {
 
 function bindLiveSearchInput(inputId, stateProp, onUpdate) {
   const el = document.getElementById(inputId);
-  if (!el) return;
+  if (!el || el.dataset.boundLiveSearch === 'true') return;
+  el.dataset.boundLiveSearch = 'true';
   el.addEventListener('input', (e) => {
-    const start = e.target.selectionStart;
-    const end = e.target.selectionEnd;
     state[stateProp] = e.target.value;
     onUpdate();
-    const nextEl = document.getElementById(inputId);
-    if (nextEl) {
-      nextEl.focus();
-      try {
-        nextEl.setSelectionRange(start, end);
-      } catch (_err) {
-        // Ignore selection range on search inputs
-      }
-    }
   });
 }
 
@@ -280,7 +330,7 @@ function addItemToCart(productId, selectedFinishOverride) {
 }
 
 function syncBodyScrollLock() {
-  const anyOpen = ['product-detail-modal', 'make-offer-modal', 'cart-drawer-backdrop'].some((id) => {
+  const anyOpen = ['product-detail-modal', 'make-offer-modal', 'cart-drawer'].some((id) => {
     const el = document.getElementById(id);
     return el && !el.classList.contains('hidden');
   });
@@ -289,8 +339,13 @@ function syncBodyScrollLock() {
 
 function renderCartState() {
   const badge = document.getElementById('cart-count-badge');
-  const itemsEl = document.getElementById('cart-drawer-items');
-  const subtotalEl = document.getElementById('cart-drawer-subtotal');
+  const itemsEl = document.getElementById('cart-items-list') || document.getElementById('cart-drawer-items');
+  const subtotalEl = document.getElementById('cart-subtotal') || document.getElementById('cart-drawer-subtotal');
+  const deliveryEl = document.getElementById('cart-delivery');
+  const totalEl = document.getElementById('cart-total');
+  const voucherSec = document.getElementById('cart-voucher-section');
+  const footerTotals = document.getElementById('cart-footer-totals');
+  const checkoutLink = document.getElementById('cart-checkout-link');
   const totalCount = state.cartItems.reduce((sum, item) => sum + item.quantity, 0);
 
   if (badge) {
@@ -301,102 +356,142 @@ function renderCartState() {
   if (!itemsEl) return;
 
   if (state.cartItems.length === 0) {
-    itemsEl.innerHTML = `<div class="py-12 text-center space-y-2"><p class="font-serif-display text-base font-bold text-[#0D1015]">Your Cart is Empty</p><p class="text-xs text-slate-500 max-w-xs mx-auto">Select any handcrafted piece from our showroom catalog to add it to your cart.</p></div>`;
+    const emptyWrap = document.createElement('div');
+    emptyWrap.className = 'py-12 text-center space-y-2';
+    const title = document.createElement('p');
+    title.className = 'font-serif-display text-base font-bold text-[#0D1015]';
+    title.textContent = 'Your Cart is Empty';
+    const sub = document.createElement('p');
+    sub.className = 'text-xs text-slate-500 max-w-xs mx-auto';
+    sub.textContent = 'Select any handcrafted piece from our showroom catalog to add it to your cart.';
+    emptyWrap.append(title, sub);
+    itemsEl.replaceChildren(emptyWrap);
     if (subtotalEl) subtotalEl.textContent = '$0';
+    if (voucherSec) voucherSec.classList.add('hidden');
+    if (footerTotals) footerTotals.classList.add('hidden');
     return;
   }
 
+  if (voucherSec) voucherSec.classList.remove('hidden');
+  if (footerTotals) footerTotals.classList.remove('hidden');
+
   let subtotal = 0;
-  itemsEl.innerHTML = state.cartItems
-    .map((entry, idx) => {
-      const p = entry.product;
-      const pricing = computeVariantPricing(p, entry.finish);
-      const lineTotal = pricing.effectivePrice * entry.quantity;
-      subtotal += lineTotal;
-      const imgUrl = String(p.image || 'assets/images/category_living_lounge.jpg').replace(/^\//, '');
-      return `
-        <div class="p-3.5 rounded-2xl border border-slate-200 bg-slate-50/70 flex items-center justify-between gap-3">
-          <div class="flex items-center gap-3 min-w-0">
-            <img src="${esc(imgUrl)}" alt="${esc(p.name)}" class="w-16 h-16 rounded-xl object-cover border border-slate-200 shrink-0" />
-            <div class="min-w-0">
-              <p class="font-serif-display text-sm font-bold text-[#0D1015] truncate">${esc(p.name)}</p>
-              <p class="text-xs text-slate-500 truncate">${esc(entry.finish)} · ${usd(pricing.effectivePrice)}</p>
-              <div class="flex items-center gap-2 mt-1.5">
-                <button type="button" data-cart-drawer-idx="${idx}" data-cart-drawer-delta="-1" class="w-6 h-6 rounded-lg border border-slate-300 bg-white text-xs font-bold cursor-pointer">−</button>
-                <span class="font-mono-tech text-xs font-bold">${entry.quantity}</span>
-                <button type="button" data-cart-drawer-idx="${idx}" data-cart-drawer-delta="1" class="w-6 h-6 rounded-lg border border-slate-300 bg-white text-xs font-bold cursor-pointer">+</button>
-                <button type="button" data-cart-drawer-remove="${idx}" class="text-[11px] font-semibold text-rose-600 hover:underline ml-1 cursor-pointer">Remove</button>
-              </div>
-            </div>
-          </div>
-          <p class="font-mono-tech text-sm font-bold text-[#0D1015] shrink-0">${usd(lineTotal)}</p>
-        </div>`;
-    })
-    .join('');
+  const nodes = state.cartItems.map((entry, idx) => {
+    const p = entry.product;
+    const pricing = computeVariantPricing(p, entry.finish);
+    const lineTotal = pricing.effectivePrice * entry.quantity;
+    subtotal += lineTotal;
+    const imgUrl = String(p.image || 'assets/images/category_living_lounge.jpg').replace(/^\//, '');
+    const node = cloneTemplate('tpl-cart-drawer-item');
+    if (!node) return document.createElement('div');
+    const img = node.querySelector('[data-role="item-img"]');
+    if (img) {
+      img.src = imgUrl;
+      img.alt = p.name;
+    }
+    setRoleText(node, 'item-name', p.name);
+    setRoleText(node, 'item-meta', `${entry.finish} · ${usd(pricing.effectivePrice)}`);
+    setRoleText(node, 'item-qty', String(entry.quantity));
+    setRoleText(node, 'item-total', usd(lineTotal));
 
-  if (subtotalEl) subtotalEl.textContent = usd(subtotal);
-
-  itemsEl.querySelectorAll('[data-cart-drawer-idx]').forEach((btn) => {
-    btn.addEventListener('click', () => {
-      const idx = Number(btn.getAttribute('data-cart-drawer-idx'));
-      const delta = Number(btn.getAttribute('data-cart-drawer-delta'));
-      const entry = state.cartItems[idx];
-      if (!entry) return;
-      const maxStock = Math.max(0, Math.floor(Number(entry.product.inStockCount ?? 0)));
-      const currentQty = state.cartItems.filter((c) => c.product.id === entry.product.id).reduce((s, c) => s + c.quantity, 0);
+    const adjustQty = (delta) => {
+      const current = state.cartItems[idx];
+      if (!current) return;
+      const maxStock = Math.max(0, Math.floor(Number(current.product.inStockCount ?? 0)));
+      const currentQty = state.cartItems.filter((c) => c.product.id === current.product.id).reduce((s, c) => s + c.quantity, 0);
       if (delta > 0 && currentQty >= maxStock) {
         showShopToast(`Only ${maxStock} available in stock.`, true);
         return;
       }
-      entry.quantity += delta;
-      if (entry.quantity <= 0) state.cartItems.splice(idx, 1);
+      current.quantity += delta;
+      if (current.quantity <= 0) state.cartItems.splice(idx, 1);
       saveCartToStorage();
       renderCartState();
-    });
-  });
-
-  itemsEl.querySelectorAll('[data-cart-drawer-remove]').forEach((btn) => {
-    btn.addEventListener('click', () => {
-      const idx = Number(btn.getAttribute('data-cart-drawer-remove'));
+    };
+    node.querySelector('[data-role="item-dec"]')?.addEventListener('click', () => adjustQty(-1));
+    node.querySelector('[data-role="item-inc"]')?.addEventListener('click', () => adjustQty(1));
+    node.querySelector('[data-role="item-remove"]')?.addEventListener('click', () => {
       state.cartItems.splice(idx, 1);
       saveCartToStorage();
       renderCartState();
     });
+    return node;
   });
+
+  itemsEl.replaceChildren(...nodes);
+  const deliveryFee = subtotal > 0 ? 150 : 0;
+  const discountAmt = state.appliedVoucher ? Number(state.appliedVoucher.discountAmount || 0) : 0;
+  if (subtotalEl) subtotalEl.textContent = usd(subtotal);
+  if (deliveryEl) deliveryEl.textContent = usd(deliveryFee);
+  if (totalEl) totalEl.textContent = usd(Math.max(0, subtotal - discountAmt) + deliveryFee);
+  const voucherRow = document.getElementById('cart-voucher-row');
+  const voucherDiscEl = document.getElementById('cart-voucher-discount');
+  if (voucherRow) {
+    voucherRow.classList.toggle('hidden', discountAmt <= 0);
+    voucherRow.classList.toggle('flex', discountAmt > 0);
+  }
+  if (voucherDiscEl) voucherDiscEl.textContent = `-${usd(discountAmt)}`;
+  if (checkoutLink) {
+    checkoutLink.href = state.sessionUser ? 'dashboard.html?role=client&tab=cart' : 'login.html';
+    checkoutLink.textContent = state.sessionUser ? 'Proceed to Checkout →' : 'Sign In to Checkout →';
+  }
 }
 
 function initCartDrawer() {
   const openBtn = document.getElementById('open-cart-btn');
   const closeBtn = document.getElementById('close-cart-btn');
-  const backdrop = document.getElementById('cart-drawer-backdrop');
   const drawer = document.getElementById('cart-drawer');
   const setOpen = (open) => {
-    if (!drawer || !backdrop) return;
-    backdrop.classList.toggle('hidden', !open);
-    drawer.classList.toggle('translate-x-full', !open);
+    if (!drawer) return;
+    drawer.classList.toggle('hidden', !open);
+    drawer.classList.toggle('flex', open);
     syncBodyScrollLock();
   };
-  if (openBtn) openBtn.addEventListener('click', () => setOpen(true));
-  if (closeBtn) closeBtn.addEventListener('click', () => setOpen(false));
-  if (backdrop) backdrop.addEventListener('click', () => setOpen(false));
+  openBtn?.addEventListener('click', () => setOpen(true));
+  closeBtn?.addEventListener('click', () => setOpen(false));
+  drawer?.addEventListener('click', (e) => {
+    if (e.target === drawer) setOpen(false);
+  });
+
+  document.getElementById('apply-voucher-btn')?.addEventListener('click', () => {
+    const code = document.getElementById('voucher-code-input')?.value.trim().toUpperCase() || '';
+    const email = state.sessionUser?.email || state.customerProfile.email || '';
+    const feedback = document.getElementById('voucher-feedback');
+    const res = validateVoucherForOrder(state.vouchers, code, email, state.cartItems, state.catalog);
+    if (feedback) {
+      feedback.classList.remove('hidden');
+      feedback.textContent = res.valid ? `✓ Voucher ${res.voucher.code} applied (-${usd(res.discountAmount)})` : `✕ ${res.errorMessage}`;
+      feedback.className = `text-xs font-medium ${res.valid ? 'text-emerald-700' : 'text-rose-600'}`;
+    }
+    state.appliedVoucher = res.valid ? res.voucher : null;
+    renderCartState();
+  });
 }
 
 function syncRoleNavigationUI() {
   const guestEl = document.getElementById('nav-guest-actions');
-  const userEl = document.getElementById('nav-user-actions');
+  const userEl = document.getElementById('nav-customer-actions') || document.getElementById('nav-user-actions');
   const adminEl = document.getElementById('nav-admin-actions');
-  const nameEl = document.getElementById('nav-user-name');
-  const logoutBtn = document.getElementById('nav-logout-btn');
-  const adminLogoutBtn = document.getElementById('nav-admin-logout-btn');
+  const footerGuest = document.getElementById('footer-guest-links');
+  const footerCustomer = document.getElementById('footer-customer-links');
+  const footerAdmin = document.getElementById('footer-admin-links');
 
   const user = state.sessionUser;
   const isAdmin = user && user.role === 'admin';
   const isClient = user && user.role !== 'admin';
 
   if (guestEl) guestEl.classList.toggle('hidden', Boolean(user));
-  if (userEl) userEl.classList.toggle('hidden', !isClient);
-  if (adminEl) adminEl.classList.toggle('hidden', !isAdmin);
-  if (nameEl && user) nameEl.textContent = user.name || 'Account';
+  if (userEl) {
+    userEl.classList.toggle('hidden', !isClient);
+    userEl.classList.toggle('flex', Boolean(isClient));
+  }
+  if (adminEl) {
+    adminEl.classList.toggle('hidden', !isAdmin);
+    adminEl.classList.toggle('flex', Boolean(isAdmin));
+  }
+  if (footerGuest) footerGuest.classList.toggle('hidden', Boolean(user));
+  if (footerCustomer) footerCustomer.classList.toggle('hidden', !isClient);
+  if (footerAdmin) footerAdmin.classList.toggle('hidden', !isAdmin);
 
   syncCustomerAvatarDOM({
     ...state.customerProfile,
@@ -405,21 +500,20 @@ function syncRoleNavigationUI() {
     avatar: user?.avatar || state.customerProfile.avatar,
   });
 
-  const handleLogout = async (e) => {
+  const handleLogout = (e) => {
     e.preventDefault();
     saveSessionUserToServer(null);
     state.cartItems = [];
     renderCartState();
     syncRoleNavigationUI();
   };
-  if (logoutBtn && !logoutBtn.dataset.bound) {
-    logoutBtn.dataset.bound = 'true';
-    logoutBtn.addEventListener('click', handleLogout);
-  }
-  if (adminLogoutBtn && !adminLogoutBtn.dataset.bound) {
-    adminLogoutBtn.dataset.bound = 'true';
-    adminLogoutBtn.addEventListener('click', handleLogout);
-  }
+  ['nav-logout-btn', 'nav-admin-logout-btn', 'footer-logout-btn', 'footer-admin-logout-btn'].forEach((id) => {
+    const btn = document.getElementById(id);
+    if (btn && !btn.dataset.bound) {
+      btn.dataset.bound = 'true';
+      btn.addEventListener('click', handleLogout);
+    }
+  });
 }
 
 function bindRequestDesignTriggers() {
@@ -460,7 +554,10 @@ function openProductDetailModal(productId) {
     if (el) el.textContent = val;
   };
   const imgEl = document.getElementById('detail-modal-image');
-  if (imgEl) imgEl.src = display.image.replace(/^\//, '');
+  if (imgEl) {
+    imgEl.src = display.image.replace(/^\//, '');
+    imgEl.alt = display.name;
+  }
 
   setTxt('detail-modal-category', display.categoryName);
   setTxt('detail-modal-sku', display.sku);
@@ -492,24 +589,29 @@ function openProductDetailModal(productId) {
 
   const finishesEl = document.getElementById('detail-modal-finishes');
   if (finishesEl) {
-    finishesEl.innerHTML = (display.colorVariants || [])
-      .map((v) => {
-        const active = v.name === display.selectedFinish;
-        return `<button type="button" data-modal-finish="${esc(v.name)}" class="px-3 py-1.5 rounded-xl border text-xs font-semibold flex items-center gap-2 cursor-pointer transition-all ${
-          active ? 'border-[#0095FF] bg-[#EBF6FF] text-[#0077CC]' : 'border-slate-200 bg-white text-slate-700 hover:border-slate-300'
-        }">
-          <span class="w-3.5 h-3.5 rounded-full border border-slate-300" style="background:${esc(v.hex || '#5C3A21')}"></span>
-          <span>${esc(v.name)}</span>
-          ${Number(v.priceDelta) > 0 ? `<span class="font-mono-tech text-[11px] text-slate-500">+${usd(v.priceDelta)}</span>` : ''}
-        </button>`;
-      })
-      .join('');
-    finishesEl.querySelectorAll('[data-modal-finish]').forEach((btn) => {
+    const swatchNodes = (display.colorVariants || []).map((v) => {
+      const btn = cloneTemplate('tpl-finish-swatch');
+      if (!btn) return document.createElement('span');
+      const active = v.name === display.selectedFinish;
+      btn.className = `px-3 py-1.5 rounded-xl border text-xs font-semibold flex items-center gap-2 cursor-pointer transition-all ${
+        active ? 'border-[#0095FF] bg-[#EBF6FF] text-[#0077CC]' : 'border-slate-200 bg-white text-slate-700 hover:border-slate-300'
+      }`;
+      const dot = btn.querySelector('[data-role="swatch-dot"]');
+      if (dot) dot.style.backgroundColor = v.hex || '#5C3A21';
+      setRoleText(btn, 'swatch-name', v.name);
+      const deltaEl = btn.querySelector('[data-role="swatch-delta"]');
+      if (deltaEl) {
+        const hasDelta = Number(v.priceDelta) > 0;
+        deltaEl.textContent = hasDelta ? `+${usd(v.priceDelta)}` : '';
+        deltaEl.classList.toggle('hidden', !hasDelta);
+      }
       btn.addEventListener('click', () => {
-        state.selectedColorByProduct[product.id] = btn.getAttribute('data-modal-finish');
+        state.selectedColorByProduct[product.id] = v.name;
         openProductDetailModal(product.id);
       });
+      return btn;
     });
+    finishesEl.replaceChildren(...swatchNodes);
   }
 
   const addBtn = document.getElementById('detail-modal-add-to-cart-btn');
@@ -536,6 +638,7 @@ function initProductDetailModal() {
   if (!modal || modal.dataset.bound === 'true') return;
   modal.dataset.bound = 'true';
 
+  document.getElementById('close-product-modal-btn')?.addEventListener('click', closeProductDetailModal);
   document.getElementById('close-detail-modal-btn')?.addEventListener('click', closeProductDetailModal);
   modal.addEventListener('click', (e) => {
     if (e.target === modal) closeProductDetailModal();
@@ -801,7 +904,6 @@ function initMakeOfferModal() {
       referenceImageName: activeOfferRefName,
     };
 
-    // Delegate validation & persistence to PHP server endpoint first
     let proposal = null;
     const serverRes = await syncDatabaseStore('create_offer', { productId: product.id, offerInput });
     if (serverRes && serverRes.ok && serverRes.proposal) {
@@ -842,8 +944,12 @@ function initMakeOfferModal() {
   });
 }
 
-function buildProductCardHtml(product) {
+function createProductCardElement(product) {
   const card = formatSimplifiedProductCardData(product);
+  const node = cloneTemplate('tpl-product-card');
+  if (!node) return document.createElement('article');
+
+  node.setAttribute('data-testid', `product-card-${card.id}`);
   const imgUrl = String(card.image || 'assets/images/category_dining_tables.jpg').replace(/^\//, '');
   const stockBadgeClass = card.isOutOfStock
     ? 'bg-rose-50 text-rose-700 border-rose-200'
@@ -851,64 +957,49 @@ function buildProductCardHtml(product) {
     ? 'bg-amber-50 text-amber-800 border-amber-200'
     : 'bg-emerald-50 text-emerald-800 border-emerald-200';
 
-  return `
-    <article data-testid="product-card-${esc(card.id)}" class="group bg-white rounded-3xl border border-slate-200/90 hover:border-[#0095FF] overflow-hidden shadow-2xs hover:shadow-md transition-all flex flex-col justify-between">
-      <div>
-        <div class="relative aspect-4/3 bg-slate-100 overflow-hidden cursor-pointer" data-open-detail="${esc(card.id)}">
-          <img src="${esc(imgUrl)}" alt="${esc(card.name)}" loading="lazy" class="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500" />
-          <div class="absolute top-3 left-3 flex flex-wrap items-center gap-1.5">
-            <span class="px-2.5 py-1 rounded-full bg-[#0D1015]/85 backdrop-blur-xs text-white text-[11px] font-semibold">${esc(card.categoryName)}</span>
-            ${card.hasDiscount ? `<span class="px-2.5 py-1 rounded-full bg-[#0095FF] text-white font-mono-tech text-[11px] font-bold">-${card.discountPercent}%</span>` : ''}
-          </div>
-          <span class="absolute top-3 right-3 px-2.5 py-1 rounded-full border text-[11px] font-mono-tech font-semibold ${stockBadgeClass}">
-            ${esc(card.availabilityLabel)}
-          </span>
-        </div>
-        <div class="p-5 space-y-2.5">
-          <div class="flex items-center justify-between gap-2 text-[11px] text-slate-500 font-mono-tech">
-            <span>${esc(card.sku)}</span>
-            <span>${esc(card.shippingTimeLabel)}</span>
-          </div>
-          <h3 class="font-serif-display text-lg font-bold text-[#0D1015] group-hover:text-[#0095FF] transition-colors cursor-pointer" data-open-detail="${esc(card.id)}">
-            ${esc(card.name)}
-          </h3>
-          <p class="text-xs text-slate-600 line-clamp-2">${esc(card.description)}</p>
-          <p class="text-[11px] text-slate-500 font-mono-tech">${esc(card.dimensions)}</p>
-        </div>
-      </div>
-      <div class="px-5 pb-5 pt-3 border-t border-slate-100 space-y-3">
-        <div class="flex items-baseline justify-between gap-2">
-          <div>
-            <span class="font-mono-tech text-xl font-bold text-[#0D1015]">${usd(card.sellingPrice)}</span>
-            ${card.hasDiscount && card.originalPrice ? `<span class="font-mono-tech text-xs text-slate-400 line-through ml-1.5">${usd(card.originalPrice)}</span>` : ''}
-          </div>
-          <button type="button" data-open-offer="${esc(card.id)}" class="text-xs font-semibold text-[#0095FF] hover:underline cursor-pointer">
-            Make Offer
-          </button>
-        </div>
-        <div class="grid grid-cols-2 gap-2">
-          <button type="button" data-open-detail="${esc(card.id)}" class="px-3 py-2.5 rounded-xl border border-slate-200 hover:border-[#0D1015] text-xs font-semibold text-[#0D1015] transition-colors cursor-pointer">
-            View Details
-          </button>
-          <button type="button" data-quick-add-cart="${esc(card.id)}" ${card.isOutOfStock ? 'disabled' : ''} class="px-3 py-2.5 rounded-xl bg-[#0D1015] hover:bg-[#0095FF] disabled:bg-slate-200 disabled:text-slate-400 text-white text-xs font-semibold transition-colors cursor-pointer">
-            ${card.isOutOfStock ? 'Out of Stock' : 'Add to Cart'}
-          </button>
-        </div>
-      </div>
-    </article>`;
-}
+  const imgEl = node.querySelector('[data-role="card-img"]');
+  if (imgEl) {
+    imgEl.src = imgUrl;
+    imgEl.alt = card.name;
+  }
+  setRoleText(node, 'card-category', card.categoryName);
+  const discEl = node.querySelector('[data-role="card-discount"]');
+  if (discEl) {
+    discEl.textContent = card.hasDiscount ? `-${card.discountPercent}%` : '';
+    discEl.classList.toggle('hidden', !card.hasDiscount);
+  }
+  const stockEl = node.querySelector('[data-role="card-stock-badge"]');
+  if (stockEl) {
+    stockEl.className = `absolute top-3 right-3 px-2.5 py-1 rounded-full border text-[11px] font-mono-tech font-semibold ${stockBadgeClass}`;
+    stockEl.textContent = card.availabilityLabel;
+  }
+  setRoleText(node, 'card-sku', card.sku);
+  setRoleText(node, 'card-shipping', card.shippingTimeLabel);
+  setRoleText(node, 'card-title', card.name);
+  setRoleText(node, 'card-desc', card.description);
+  setRoleText(node, 'card-dims', card.dimensions);
+  setRoleText(node, 'card-price', usd(card.sellingPrice));
 
-function bindCatalogCardEvents(container) {
-  if (!container) return;
-  container.querySelectorAll('[data-open-detail]').forEach((el) => {
-    el.addEventListener('click', () => openProductDetailModal(el.getAttribute('data-open-detail')));
-  });
-  container.querySelectorAll('[data-open-offer]').forEach((el) => {
-    el.addEventListener('click', () => openMakeOfferModal(el.getAttribute('data-open-offer')));
-  });
-  container.querySelectorAll('[data-quick-add-cart]').forEach((el) => {
-    el.addEventListener('click', () => addItemToCart(el.getAttribute('data-quick-add-cart')));
-  });
+  const origEl = node.querySelector('[data-role="card-orig-price"]');
+  if (origEl) {
+    const showOrig = Boolean(card.hasDiscount && card.originalPrice);
+    origEl.textContent = showOrig ? usd(card.originalPrice) : '';
+    origEl.classList.toggle('hidden', !showOrig);
+  }
+
+  node.querySelector('[data-role="card-image-trigger"]')?.addEventListener('click', () => openProductDetailModal(card.id));
+  node.querySelector('[data-role="card-title"]')?.addEventListener('click', () => openProductDetailModal(card.id));
+  node.querySelector('[data-role="card-detail-btn"]')?.addEventListener('click', () => openProductDetailModal(card.id));
+  node.querySelector('[data-role="card-offer-btn"]')?.addEventListener('click', () => openMakeOfferModal(card.id));
+
+  const cartBtn = node.querySelector('[data-role="card-cart-btn"]');
+  if (cartBtn) {
+    cartBtn.disabled = card.isOutOfStock;
+    cartBtn.textContent = card.isOutOfStock ? 'Out of Stock' : 'Add to Cart';
+    cartBtn.addEventListener('click', () => addItemToCart(card.id));
+  }
+
+  return node;
 }
 
 function renderCatalogGrid() {
@@ -918,42 +1009,65 @@ function renderCatalogGrid() {
   const isFiltering = state.activeCategory !== 'all' || Boolean(state.searchQuery.trim()) || state.catalogShowAll;
   const visibleItems = isFiltering
     ? filterFurnitureItems(state.catalog, state.searchQuery, state.activeCategory)
-    : getRecommendedBestSellers(state.catalog, 6);
+    : getRecommendedBestSellers(state.catalog, 4);
 
   const countLabel = document.getElementById('catalog-count-label');
-  if (countLabel) countLabel.textContent = `Showing ${visibleItems.length} of ${state.catalog.length} pieces`;
+  if (countLabel) {
+    countLabel.textContent = isFiltering
+      ? `Showing ${visibleItems.length} of ${state.catalog.length} pieces`
+      : `Showing ${visibleItems.length} Recommended Best Sellers`;
+  }
 
-  grid.innerHTML =
-    visibleItems.length === 0
-      ? `<div class="col-span-full py-12 text-center space-y-2"><p class="font-serif-display text-lg font-bold text-[#0D1015]">No Matching Furniture Pieces</p><p class="text-xs text-slate-500">Try clearing your search or selecting All Rooms.</p></div>`
-      : visibleItems.map(buildProductCardHtml).join('');
+  if (visibleItems.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'col-span-full py-12 text-center space-y-2';
+    const p = document.createElement('p');
+    p.className = 'font-serif-display text-lg font-bold text-[#0D1015]';
+    p.textContent = 'No Matching Furniture Pieces';
+    empty.appendChild(p);
+    grid.replaceChildren(empty);
+    return;
+  }
 
-  bindCatalogCardEvents(grid);
+  grid.replaceChildren(...visibleItems.map(createProductCardElement));
 }
 
-function renderCategoriesGrid() {
-  const grid = document.getElementById('categories-grid');
-  if (!grid) return;
-  grid.innerHTML = state.categories
-    .map((cat) => {
-      const count = state.catalog.filter((p) => p.categoryId === cat.id).length;
-      const imgUrl = String(cat.image || 'assets/images/category_living_lounge.jpg').replace(/^\//, '');
-      return `
-        <a href="catalog.html?category=${encodeURIComponent(cat.id)}" data-category-card="${esc(cat.id)}" class="group relative rounded-3xl overflow-hidden border border-slate-200 aspect-4/3 flex flex-col justify-end p-5 bg-slate-900">
-          <img src="${esc(imgUrl)}" alt="${esc(cat.name)}" loading="lazy" class="absolute inset-0 w-full h-full object-cover opacity-80 group-hover:scale-105 transition-transform duration-500" />
-          <div class=" inset-0 bg-gradient-to-t from-[#0D1015]/90 via-[#0D1015]/30 to-transparent absolute"></div>
-          <div class="relative z-10 text-white space-y-1">
-            <span class="font-mono-tech text-[11px] uppercase tracking-wider text-[#BCE3FF]">${count} Pieces</span>
-            <h3 class="font-serif-display text-lg font-bold">${esc(cat.name)}</h3>
-            <p class="text-xs text-slate-200 line-clamp-1">${esc(cat.tagline)}</p>
-          </div>
-        </a>`;
-    })
-    .join('');
+function initHeroTabs() {
+  const tabs = document.querySelectorAll('[data-hero-tab]');
+  if (tabs.length === 0) return;
+  tabs.forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const key = btn.getAttribute('data-hero-tab') || 'flagship';
+      const copy = HERO_TAB_COPY[key] || HERO_TAB_COPY.flagship;
+      tabs.forEach((t) => {
+        const active = t === btn;
+        t.setAttribute('aria-selected', active ? 'true' : 'false');
+        t.className = active
+          ? 'hero-tab-btn px-3.5 py-1.5 rounded-lg bg-[#0095FF] text-white text-xs font-semibold tracking-wide shrink-0 cursor-pointer transition-colors'
+          : 'hero-tab-btn px-3.5 py-1.5 rounded-lg bg-slate-900/90 hover:bg-slate-800 text-slate-300 border border-slate-700 text-xs font-medium shrink-0 cursor-pointer transition-colors';
+      });
+      const setTxt = (id, v) => {
+        const el = document.getElementById(id);
+        if (el) el.textContent = v;
+      };
+      setTxt('hero-eyebrow', copy.eyebrow);
+      setTxt('hero-headline', copy.headline);
+      setTxt('hero-description', copy.description);
+      setTxt('hero-price', copy.price);
+      setTxt('hero-primary-cta-text', copy.ctaText);
+      setTxt('hero-card-title', copy.cardTitle);
+      const heroImg = document.getElementById('hero-image');
+      if (heroImg) heroImg.src = copy.image;
+      const primaryCta = document.getElementById('hero-primary-cta');
+      if (primaryCta) primaryCta.href = `catalog.html?category=${copy.ctaCategory}`;
+      const cardCta = document.getElementById('hero-card-cta');
+      if (cardCta) cardCta.href = `catalog.html?category=${copy.ctaCategory}`;
+    });
+  });
 }
 
 function initDedicatedCatalogPage() {
-  const grid = document.getElementById('dedicated-catalog-grid');
+  const grid = document.getElementById('catalog-page-grid') || document.getElementById('dedicated-catalog-grid');
   if (!grid) return;
 
   const params = new URLSearchParams(window.location.search);
@@ -961,42 +1075,88 @@ function initDedicatedCatalogPage() {
   if (params.get('q')) state.catalogPageSearch = params.get('q');
 
   const renderDedicated = () => {
-    let items = filterFurnitureItems(state.catalog, state.catalogPageSearch, state.catalogPageCategory);
-    if (state.catalogPageStock === 'in_stock') {
-      items = items.filter((p) => Number(p.inStockCount ?? 0) > 0);
-    }
-    if (state.catalogPageSort === 'price_asc') {
-      items = [...items].sort((a, b) => Number(a.effectivePrice || a.price) - Number(b.effectivePrice || b.price));
-    } else if (state.catalogPageSort === 'price_desc') {
-      items = [...items].sort((a, b) => Number(b.effectivePrice || b.price) - Number(a.effectivePrice || a.price));
-    }
-
-    const countEl = document.getElementById('dedicated-catalog-count');
-    if (countEl) countEl.textContent = `${items.length} ${items.length === 1 ? 'Piece' : 'Pieces'}`;
-
-    document.querySelectorAll('[data-catalog-category-pill]').forEach((btn) => {
-      const cat = btn.getAttribute('data-catalog-category-pill');
-      const active = cat === state.catalogPageCategory;
-      btn.className = active
-        ? 'px-4 py-2 rounded-full text-xs font-semibold bg-[#0095FF] text-white cursor-pointer'
-        : 'px-4 py-2 rounded-full text-xs font-semibold bg-slate-100 text-slate-700 hover:bg-slate-200 cursor-pointer';
+    const items = filterCatalogPageItems(state.catalog, {
+      categoryId: state.catalogPageCategory,
+      colorKey: state.catalogPageColor || 'all',
+      maxPrice: state.catalogPageMaxPrice,
+      searchQuery: state.catalogPageSearch,
     });
 
-    grid.innerHTML =
-      items.length === 0
-        ? `<div class="col-span-full py-12 text-center space-y-2"><p class="font-serif-display text-lg font-bold">No Matching Pieces</p><p class="text-xs text-slate-500">Reset filters to view all showroom pieces.</p></div>`
-        : items.map(buildProductCardHtml).join('');
-    bindCatalogCardEvents(grid);
+    const countEl = document.getElementById('catalog-page-result-count') || document.getElementById('dedicated-catalog-count');
+    if (countEl) countEl.textContent = `${items.length} ${items.length === 1 ? 'PRODUCT' : 'PRODUCTS'}`;
+
+    document.querySelectorAll('[data-catalog-top-tab]').forEach((btn) => {
+      const cat = btn.getAttribute('data-catalog-top-tab');
+      const active = cat === state.catalogPageCategory;
+      btn.className = active
+        ? 'catalog-top-tab py-3.5 text-xs sm:text-sm font-semibold text-[#0095FF] border-t-2 border-[#0095FF] whitespace-nowrap cursor-pointer transition-colors'
+        : 'catalog-top-tab py-3.5 text-xs sm:text-sm font-medium text-[#0D1015] hover:text-[#0095FF] border-t-2 border-transparent whitespace-nowrap cursor-pointer transition-colors';
+    });
+
+    const colorsEl = document.getElementById('catalog-sidebar-colors');
+    if (colorsEl) {
+      const colors = getColorFilterCounts(state.catalog, state.catalogPageCategory, state.catalogPageMaxPrice);
+      const colorNodes = colors.map((c) => {
+        const btn = cloneTemplate('tpl-catalog-color-filter');
+        if (!btn) return document.createElement('button');
+        const active = state.catalogPageColor === c.key;
+        btn.className = `px-3 py-1.5 rounded-xl border text-xs font-semibold flex items-center gap-2 cursor-pointer transition-all ${
+          active ? 'border-[#0095FF] bg-[#EBF6FF] text-[#0077CC]' : 'border-slate-200 bg-white text-slate-700 hover:border-slate-300'
+        }`;
+        const dot = btn.querySelector('[data-role="color-dot"]');
+        if (dot) dot.style.backgroundColor = c.hex;
+        setRoleText(btn, 'color-name', c.label);
+        setRoleText(btn, 'color-count', `(${c.count})`);
+        btn.addEventListener('click', () => {
+          state.catalogPageColor = active ? '' : c.key;
+          renderDedicated();
+        });
+        return btn;
+      });
+      colorsEl.replaceChildren(...colorNodes);
+    }
+
+    const roomTagsEl = document.getElementById('catalog-sidebar-room-tags');
+    if (roomTagsEl) {
+      const roomList = [{ id: 'all', name: 'All Rooms' }, ...state.categories];
+      const roomNodes = roomList.map((r) => {
+        const btn = cloneTemplate('tpl-catalog-room-tag') || document.createElement('button');
+        const active = state.catalogPageCategory === r.id;
+        btn.className = `px-3 py-1.5 rounded-xl border text-xs font-semibold cursor-pointer transition-all ${
+          active ? 'border-[#0095FF] bg-[#0095FF] text-white' : 'border-slate-200 bg-white text-slate-700 hover:border-slate-300'
+        }`;
+        const cnt = r.id === 'all' ? state.catalog.length : state.catalog.filter((p) => p.categoryId === r.id).length;
+        btn.textContent = `${r.name} (${cnt})`;
+        btn.addEventListener('click', () => {
+          state.catalogPageCategory = r.id;
+          renderDedicated();
+        });
+        return btn;
+      });
+      roomTagsEl.replaceChildren(...roomNodes);
+    }
+
+    if (items.length === 0) {
+      const empty = document.createElement('div');
+      empty.className = 'col-span-full py-12 text-center space-y-2';
+      const p = document.createElement('p');
+      p.className = 'font-serif-display text-lg font-bold';
+      p.textContent = 'No Matching Pieces';
+      empty.appendChild(p);
+      grid.replaceChildren(empty);
+    } else {
+      grid.replaceChildren(...items.map(createProductCardElement));
+    }
   };
 
-  document.querySelectorAll('[data-catalog-category-pill]').forEach((btn) => {
+  document.querySelectorAll('[data-catalog-top-tab]').forEach((btn) => {
     btn.addEventListener('click', () => {
-      state.catalogPageCategory = btn.getAttribute('data-catalog-category-pill') || 'all';
+      state.catalogPageCategory = btn.getAttribute('data-catalog-top-tab') || 'all';
       renderDedicated();
     });
   });
 
-  const searchInput = document.getElementById('top-nav-search') || document.getElementById('catalog-search-input');
+  const searchInput = document.getElementById('catalog-page-search') || document.getElementById('top-nav-search');
   if (searchInput) {
     searchInput.value = state.catalogPageSearch;
     searchInput.addEventListener('input', (e) => {
@@ -1005,8 +1165,25 @@ function initDedicatedCatalogPage() {
     });
   }
 
-  document.getElementById('catalog-sort-select')?.addEventListener('change', (e) => {
-    state.catalogPageSort = e.target.value;
+  const slider = document.getElementById('catalog-price-slider');
+  const priceLabel = document.getElementById('catalog-price-label');
+  slider?.addEventListener('input', (e) => {
+    state.catalogPageMaxPrice = Number(e.target.value) || 5500;
+    if (priceLabel) priceLabel.textContent = usd(state.catalogPageMaxPrice);
+    renderDedicated();
+  });
+  document.getElementById('catalog-price-apply-btn')?.addEventListener('click', renderDedicated);
+  document.getElementById('catalog-clear-color-btn')?.addEventListener('click', () => {
+    state.catalogPageColor = '';
+    renderDedicated();
+  });
+  document.getElementById('catalog-reset-all-btn')?.addEventListener('click', () => {
+    state.catalogPageCategory = 'all';
+    state.catalogPageSearch = '';
+    state.catalogPageColor = '';
+    state.catalogPageMaxPrice = 5500;
+    if (slider) slider.value = '5500';
+    if (priceLabel) priceLabel.textContent = '$5,500';
     renderDedicated();
   });
 
@@ -1026,13 +1203,6 @@ function initStorefrontSearchAndFilters() {
       renderCatalogGrid();
     });
   }
-  document.querySelectorAll('[data-category-filter]').forEach((btn) => {
-    btn.addEventListener('click', () => {
-      state.activeCategory = btn.getAttribute('data-category-filter') || 'all';
-      state.catalogShowAll = state.activeCategory !== 'all';
-      renderCatalogGrid();
-    });
-  });
 }
 
 async function bootstrapApp() {
@@ -1043,7 +1213,7 @@ async function bootstrapApp() {
   initProductDetailModal();
   initMakeOfferModal();
   bindRequestDesignTriggers();
-  renderCategoriesGrid();
+  initHeroTabs();
   renderCatalogGrid();
   initStorefrontSearchAndFilters();
   initDedicatedCatalogPage();

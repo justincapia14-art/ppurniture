@@ -54,6 +54,19 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   };
 
+  const primaryLink = $('login-session-primary-link');
+  const secondaryLink = $('login-session-secondary-link');
+  const logoutBtn = $('login-page-logout-btn');
+
+  logoutBtn?.addEventListener('click', async () => {
+    await fetch(API_ENDPOINT, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'save_session', sessionUser: null }),
+    }).catch(() => {});
+    renderActiveSessionBanner();
+  });
+
   async function renderActiveSessionBanner() {
     if (!sessionBanner || !sessionUserEl || !sessionActions) return;
     try {
@@ -67,22 +80,14 @@ document.addEventListener('DOMContentLoaded', () => {
       const isAdmin = String(session.role).toLowerCase() === 'admin';
       sessionBanner.style.display = 'block';
       sessionUserEl.textContent = `${session.name || session.email} (${isAdmin ? 'Admin' : 'Customer'})`;
-      const btnStyle = 'padding:0.45rem 0.85rem;border-radius:0.5rem;font-size:0.75rem;font-weight:700;text-decoration:none;';
-      sessionActions.innerHTML = isAdmin
-        ? `<a href="dashboard.html?role=admin" style="${btnStyle}background:#0095FF;color:#FFF;">Admin Dashboard →</a>
-           <a href="index.html" style="${btnStyle}background:#FFF;border:1px solid #CBD5E1;color:#0F172A;">Back to Showroom</a>
-           <button type="button" id="login-page-logout-btn" style="${btnStyle}background:#FEE2E2;border:1px solid #FECACA;color:#DC2626;cursor:pointer;">Log Out</button>`
-        : `<a href="dashboard.html?role=client&tab=home" style="${btnStyle}background:#0095FF;color:#FFF;">My Account →</a>
-           <a href="dashboard.html?role=client&tab=orders" style="${btnStyle}background:#FFF;border:1px solid #CBD5E1;color:#0F172A;">My Orders</a>
-           <button type="button" id="login-page-logout-btn" style="${btnStyle}background:#FEE2E2;border:1px solid #FECACA;color:#DC2626;cursor:pointer;">Log Out</button>`;
-      $('login-page-logout-btn')?.addEventListener('click', async () => {
-        await fetch(API_ENDPOINT, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ action: 'save_session', sessionUser: null }),
-        }).catch(() => {});
-        renderActiveSessionBanner();
-      });
+      if (primaryLink) {
+        primaryLink.href = isAdmin ? 'dashboard.html?role=admin' : 'dashboard.html?role=client&tab=home';
+        primaryLink.textContent = isAdmin ? 'Admin Dashboard →' : 'My Account →';
+      }
+      if (secondaryLink) {
+        secondaryLink.href = isAdmin ? 'index.html' : 'dashboard.html?role=client&tab=orders';
+        secondaryLink.textContent = isAdmin ? 'Back to Showroom' : 'My Orders';
+      }
     } catch {
       sessionBanner.style.display = 'none';
     }

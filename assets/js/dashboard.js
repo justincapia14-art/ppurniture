@@ -3,7 +3,6 @@ import {
   PRODUCT_TYPES,
   applyAdminOrderUpdate,
   applyMaterialStockMovement,
-  buildMaterialRecord,
   buildProductRecord,
   calculateExpirationFromInput,
   calculateOrderPricing,
@@ -13,7 +12,6 @@ import {
   computeVariantPricing,
   computeVoucherStatusInfo,
   createCustomOrderRequest,
-  describeMaterialStockPreview,
   filterCustomerVouchers,
   filterInventoryMaterials,
   formatSimplifiedProductCardData,
@@ -30,14 +28,11 @@ import {
   paginateItems,
   partitionOrdersByCompletion,
   recordCustomerOrderPayment,
-  removeMaterialFromInventory,
   removeProductFromCatalog,
   requestOrderCancellation,
-  resolveCustomerAvatarState,
   resolveOrderCancellationRequest,
   revokeVoucherInList,
   validateAndCreateVoucher,
-  validateMaterialInput,
   validateNewFurnitureInput,
   validateVoucherForOrder,
   verifyAndCreateOrder,
@@ -55,14 +50,12 @@ export function createDashboard({
   API_ENDPOINT,
   FRIENDLY_CUSTOMER_STEPS,
   syncCustomerAvatarDOM,
-  esc,
   usd,
   bindLiveSearchInput,
   syncDatabaseStore,
   persistProductToStorage,
   saveMaterialsToStorage,
   saveOrdersToStorage,
-  saveInventoryTransactionsToStorage,
   saveSessionUserToServer,
   saveCartToStorage,
   saveCustomerProfileToStorage,
@@ -71,6 +64,43 @@ export function createDashboard({
   let voucherCountdownTimerId = null;
   let pendingConfirmAction = null;
   let pendingCancelAction = null;
+
+  function cloneTpl(id) {
+    const tpl = document.getElementById(id);
+    return tpl && tpl.content && tpl.content.firstElementChild
+      ? tpl.content.firstElementChild.cloneNode(true)
+      : null;
+  }
+
+  function setRole(root, role, text) {
+    const el = root?.querySelector(`[data-role="${role}"]`);
+    if (el) el.textContent = text;
+    return el;
+  }
+
+  function createOption(value, label, selected = false) {
+    const opt = document.createElement('option');
+    opt.value = String(value ?? '');
+    opt.textContent = String(label ?? '');
+    opt.selected = Boolean(selected);
+    return opt;
+  }
+
+  function applyStatusBadge(badgeEl, textEl, statusKey, customLabel = null) {
+    if (!badgeEl) return;
+    const cls =
+      statusKey === 'out_of_stock'
+        ? 'admin-status-out-of-stock'
+        : statusKey === 'low_stock'
+        ? 'admin-status-low-stock'
+        : 'admin-status-in-stock';
+    badgeEl.className = `admin-status-badge ${cls}`;
+    const label =
+      customLabel ||
+      (statusKey === 'out_of_stock' ? 'Out of Stock' : statusKey === 'low_stock' ? 'Low Stock' : 'In Stock');
+    if (textEl) textEl.textContent = label;
+    else badgeEl.textContent = label;
+  }
 
   function openAdminConfirmModal({
     title,
@@ -116,13 +146,15 @@ export function createDashboard({
     banner.className = isError
       ? 'p-3.5 rounded-xl bg-rose-50 border border-rose-200 text-rose-800 text-sm font-medium flex items-center justify-between gap-3'
       : 'p-3.5 rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-800 text-sm font-medium flex items-center justify-between gap-3';
-    banner.innerHTML = `<span class="flex items-center gap-2"><span class="font-bold">${
-      isError ? '!' : '✓'
-    }</span><span>${esc(msg)}</span></span><button type="button" id="admin-banner-dismiss" class="text-xs font-semibold ${
-      isError ? 'text-rose-800' : 'text-emerald-800'
-    } hover:underline cursor-pointer">Dismiss</button>`;
+    const textWrap = document.createElement('span');
+    textWrap.textContent = `${isError ? '! ' : '✓ '}${msg}`;
+    const dismissBtn = document.createElement('button');
+    dismissBtn.type = 'button';
+    dismissBtn.className = 'text-xs font-semibold hover:underline cursor-pointer';
+    dismissBtn.textContent = 'Dismiss';
+    dismissBtn.addEventListener('click', () => banner.classList.add('hidden'));
+    banner.replaceChildren(textWrap, dismissBtn);
     banner.classList.remove('hidden');
-    document.getElementById('admin-banner-dismiss')?.addEventListener('click', () => banner.classList.add('hidden'));
   }
 
   function startVoucherCountdownTicker() {
@@ -308,23 +340,6 @@ export function createDashboard({
       renderDashboardContent();
     });
 
-    document.getElementById('client-cart-add-btn')?.addEventListener('click', () => {
-      const pid = document.getElementById('client-cart-add-select')?.value || '';
-      const prod = state.catalog.find((p) => p.id === pid);
-      if (!prod) return;
-      const available = Math.max(0, Math.floor(Number(prod.inStockCount ?? 0)));
-      if (available <= 0) return showClientBanner(`"${prod.name}" is currently Out of Stock.`);
-      const curQty = state.cartItems.filter((c) => c.product.id === prod.id).reduce((s, c) => s + c.quantity, 0);
-      if (curQty >= available) return showClientBanner(`Cannot add more "${prod.name}": only ${available} in stock.`);
-      const finish = prod.defaultFinish || prod.colorVariants?.[0]?.name || 'Natural Finish';
-      const existing = state.cartItems.find((c) => c.product.id === prod.id && c.finish === finish);
-      if (existing) existing.quantity += 1;
-      else state.cartItems.push({ product: prod, finish, quantity: 1 });
-      saveCartToStorage();
-      showClientBanner(`Added "${prod.name}" to your Cart.`);
-      renderDashboardContent();
-    });
-
     const clientApplyVoucherBtn = document.getElementById('client-cart-apply-voucher-btn');
     const clientVoucherInput = document.getElementById('client-cart-voucher-input');
     const clientVoucherFeedback = document.getElementById('client-cart-voucher-feedback');
@@ -362,7 +377,6 @@ export function createDashboard({
     document.getElementById('client-cart-checkout-btn')?.addEventListener('click', async () => {
       if (state.cartItems.length === 0) return;
       const voucherCode = state.appliedVoucher ? state.appliedVoucher.code : '';
-      // Authoritative PHP/server checkout first, with local store fallback
       const serverCheckout = await syncDatabaseStore('place_order', {
         voucherCode,
         customerProfile: state.customerProfile,
@@ -416,6 +430,70 @@ export function createDashboard({
       syncDatabaseStore('sync_store');
       showClientBanner(`Order #${checkoutResult.order.orderNumber} placed for ${usd(checkoutResult.order.totalAmount)}.`);
       switchClientTab('orders');
+      renderDashboardContent();
+    });
+
+    // Static Custom Commission Form Events
+    document.getElementById('cust-ord-product')?.addEventListener('change', (e) => {
+      state.clientCustomOrderInput.productId = e.target.value;
+      renderDashboardContent();
+    });
+    document.getElementById('cust-ord-material')?.addEventListener('change', (e) => {
+      state.clientCustomOrderInput.materialId = e.target.value;
+      renderDashboardContent();
+    });
+    document.getElementById('client-cancel-custom-commission-btn')?.addEventListener('click', () => {
+      state.clientCustomOrderOpen = false;
+      renderDashboardContent();
+    });
+    document.getElementById('client-custom-commission-form')?.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const userEmail = state.sessionUser?.email || state.customerProfile.email;
+      const selectedMat = state.materials.find((m) => m.id === document.getElementById('cust-ord-material')?.value);
+      const extraCost = Math.max(250, Math.round(Number(selectedMat?.unitCost || 0) * 4));
+      const customInput = {
+        productId: document.getElementById('cust-ord-product')?.value || '',
+        materialId: document.getElementById('cust-ord-material')?.value || '',
+        colorFinish: document.getElementById('cust-ord-finish')?.value || 'Natural Oil',
+        lengthCm: document.getElementById('cust-ord-length')?.value || 240,
+        widthCm: document.getElementById('cust-ord-width')?.value || 100,
+        heightCm: document.getElementById('cust-ord-height')?.value || 75,
+        notes: document.getElementById('cust-ord-notes')?.value || '',
+        extraCost,
+        materialQtyUsed: 2,
+      };
+      const serverRes = await syncDatabaseStore('create_custom_order', {
+        customInput,
+        customerProfile: { name: state.customerProfile.name, email: userEmail },
+      });
+      if (serverRes && serverRes.ok && serverRes.order) {
+        if (Array.isArray(serverRes.orders)) state.orders = serverRes.orders;
+        if (Array.isArray(serverRes.materials)) state.materials = serverRes.materials;
+        if (Array.isArray(serverRes.inventoryTransactions))
+          state.inventoryTransactions = serverRes.inventoryTransactions;
+        state.clientCustomOrderOpen = false;
+        showClientBanner(`Custom Commission #${serverRes.order.orderNumber} submitted!`);
+        renderDashboardContent();
+        return;
+      }
+      const res = createCustomOrderRequest({
+        catalog: state.catalog,
+        materials: state.materials,
+        customerProfile: { name: state.customerProfile.name, email: userEmail },
+        customInput,
+      });
+      if (!res.ok) {
+        const errEl = document.getElementById('client-custom-commission-error');
+        if (errEl) {
+          errEl.textContent = res.errorMessage;
+          errEl.classList.remove('hidden');
+        }
+        return;
+      }
+      state.orders.unshift(res.order);
+      saveOrdersToStorage();
+      state.clientCustomOrderOpen = false;
+      showClientBanner(`Custom Commission #${res.order.orderNumber} submitted!`);
       renderDashboardContent();
     });
 
@@ -499,12 +577,12 @@ export function createDashboard({
     const prodImageFileInput = document.getElementById('prod-image-file');
 
     if (prodMessengerThreadSelect) {
-      prodMessengerThreadSelect.innerHTML = [
-        `<option value="">None — General Messenger Customization</option>`,
-        ...(state.messengerConversations || []).map(
-          (c) => `<option value="${esc(c.id)}">${esc(c.customerName)} (${esc(c.customerEmail)}) — ${esc(c.topic)}</option>`
-        ),
-      ].join('');
+      prodMessengerThreadSelect.replaceChildren(
+        createOption('', 'None — General Messenger Customization'),
+        ...(state.messengerConversations || []).map((c) =>
+          createOption(c.id, `${c.customerName} (${c.customerEmail}) — ${c.topic}`)
+        )
+      );
     }
 
     const syncProductImagePreview = (rawValue) => {
@@ -677,8 +755,76 @@ export function createDashboard({
     adminTabBtns.forEach((btn) =>
       btn.addEventListener('click', () => switchAdminTab(btn.getAttribute('data-admin-tab') || 'overview'))
     );
+    document.querySelectorAll('[data-admin-jump]').forEach((btn) =>
+      btn.addEventListener('click', () => switchAdminTab(btn.getAttribute('data-admin-jump') || 'overview'))
+    );
+    document.getElementById('admin-toggle-add-product-btn')?.addEventListener('click', () => switchAdminTab('add-product'));
     document.getElementById('admin-close-product-form')?.addEventListener('click', () => switchAdminTab('catalog'));
     document.getElementById('admin-cancel-product-btn')?.addEventListener('click', () => switchAdminTab('catalog'));
+
+    bindLiveSearchInput('admin-catalog-search', 'adminProductSearch', () => {
+      state.adminProductPage = 1;
+      renderDashboardContent();
+    });
+    bindLiveSearchInput('admin-inv-stock-search', 'adminInventoryStockSearch', () => {
+      state.adminInventoryPage = 1;
+      renderDashboardContent();
+    });
+    document.getElementById('admin-inv-category-filter')?.addEventListener('change', (e) => {
+      state.adminInventoryCategoryFilter = e.target.value;
+      state.adminInventoryPage = 1;
+      renderDashboardContent();
+    });
+    bindLiveSearchInput('admin-orders-search', 'adminOrderSearch', renderDashboardContent);
+    bindLiveSearchInput('admin-customers-search', 'adminCustomerSearch', renderDashboardContent);
+
+    // Static Analytics Controls Events
+    document.querySelectorAll('[data-analytics-preset]').forEach((btn) =>
+      btn.addEventListener('click', () => {
+        state.adminAnalyticsPreset = btn.getAttribute('data-analytics-preset') || 'this_month';
+        renderAdminAnalyticsSection();
+      })
+    );
+    document.querySelectorAll('[data-analytics-quick-month]').forEach((btn) =>
+      btn.addEventListener('click', () => {
+        const [yStr, mStr] = (btn.getAttribute('data-analytics-quick-month') || '2026-11').split('-');
+        state.adminAnalyticsPreset = 'select_month';
+        state.adminAnalyticsYear = yStr;
+        state.adminAnalyticsMonth = String(Number(mStr));
+        renderAdminAnalyticsSection();
+      })
+    );
+    document.getElementById('analytics-overview-period-select')?.addEventListener('change', (e) => {
+      const [yStr, mStr] = String(e.target.value || '2026-11').split('-');
+      state.adminAnalyticsPreset = 'select_month';
+      state.adminAnalyticsYear = yStr;
+      state.adminAnalyticsMonth = String(Number(mStr));
+      renderAdminAnalyticsSection();
+    });
+    document.getElementById('analytics-export-pdf-btn')?.addEventListener('click', () => {
+      const report = window.__latestAnalyticsReport;
+      if (!report) return;
+      const pdfBytes = buildAnalyticsPdfBytes(report);
+      const url = URL.createObjectURL(new Blob([pdfBytes], { type: 'application/pdf' }));
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `lillia-rowena-analytics-${String(report.period.label).toLowerCase().replace(/[^a-z0-9]+/g, '-')}.pdf`;
+      a.click();
+      showAdminBanner(`Downloaded PDF Report for ${report.period.label}.`);
+    });
+    document.getElementById('analytics-export-csv-btn')?.addEventListener('click', async () => {
+      const report = window.__latestAnalyticsReport;
+      if (!report) return;
+      const serverCsv = await syncDatabaseStore('export_analytics_csv', { filterInput: window.__latestAnalyticsFilter });
+      const csvText = serverCsv?.ok && serverCsv.csv ? serverCsv.csv : buildAnalyticsCsvContent(report);
+      const url = URL.createObjectURL(new Blob([csvText], { type: 'text/csv;charset=utf-8;' }));
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `lillia-rowena-analytics-${String(report.period.label).toLowerCase().replace(/[^a-z0-9]+/g, '-')}.csv`;
+      a.click();
+      showAdminBanner(`Exported CSV Report for ${report.period.label}.`);
+    });
+    document.getElementById('analytics-print-report-btn')?.addEventListener('click', () => window.print());
 
     const confirmModal = document.getElementById('admin-confirm-modal');
     document.getElementById('admin-confirm-cancel')?.addEventListener('click', () => {
@@ -907,67 +1053,68 @@ export function createDashboard({
       setTxt('sidebar-badge-cart', String(cartQty));
       setTxt('sidebar-badge-vouchers', String(usableCustomerVouchers.length));
 
+      // Home Latest Order Preview
       const homeOrderPreview = document.getElementById('client-home-order-preview');
       if (homeOrderPreview) {
         if (displayOrders[0]) {
           const latest = displayOrders[0];
           const matched = state.catalog.find((p) => p.id === latest.furnitureId) || state.catalog[0];
           const imgUrl = (matched ? matched.image : 'assets/images/category_dining_tables.jpg').replace(/^\//, '');
-          homeOrderPreview.innerHTML = `<div class="pt-4 border-t border-[#E2E8F0] flex flex-col sm:flex-row sm:items-center justify-between gap-4"><div class="flex items-center gap-3.5"><img src="${esc(
-            imgUrl
-          )}" alt="${esc(latest.furnitureName)}" class="w-16 h-16 rounded-xl object-cover border border-[#BCE3FF] shrink-0" /><div><p class="font-mono-tech text-xs text-[#0077CC] font-bold">${esc(
-            latest.status
-          )} · #${esc(latest.orderNumber)}</p><h3 class="font-serif-display text-base font-bold text-[#0D1015] mt-0.5">${esc(
-            latest.furnitureName
-          )}</h3><p class="text-xs text-[#475569]">Finish: <strong class="text-[#0D1015]">${esc(
-            latest.selectedFinish
-          )}</strong> · Size: ${esc(latest.customDimensions || 'Standard Dimensions')}</p></div></div><p class="font-mono-tech text-lg font-bold text-[#0095FF] shrink-0">${usd(
-            latest.totalAmount
-          )}</p></div>`;
+          const node = cloneTpl('tpl-client-home-order');
+          if (node) {
+            const img = node.querySelector('[data-role="ord-img"]');
+            if (img) {
+              img.src = imgUrl;
+              img.alt = latest.furnitureName;
+            }
+            setRole(node, 'ord-status-num', `${latest.status} · #${latest.orderNumber}`);
+            setRole(node, 'ord-title', latest.furnitureName);
+            setRole(node, 'ord-finish', latest.selectedFinish);
+            setRole(node, 'ord-dims', latest.customDimensions || 'Standard Dimensions');
+            setRole(node, 'ord-total', usd(latest.totalAmount));
+            homeOrderPreview.replaceChildren(node);
+          }
         } else {
-          homeOrderPreview.innerHTML = `<div class="pt-4 border-t border-[#E2E8F0] text-center py-6 space-y-2"><p class="text-sm font-bold text-[#0D1015]">No Active Orders Yet</p></div>`;
+          const empty = document.createElement('p');
+          empty.className = 'pt-4 border-t border-[#E2E8F0] text-center py-6 text-sm font-bold text-[#0D1015]';
+          empty.textContent = 'No Active Orders Yet';
+          homeOrderPreview.replaceChildren(empty);
         }
       }
 
-      const homeAddrPreview = document.getElementById('client-home-address-preview');
-      if (homeAddrPreview) {
-        const formattedAddr = [state.customerProfile.address, state.customerProfile.city]
-          .map((s) => String(s || '').trim())
-          .filter(Boolean)
-          .join(', ');
-        homeAddrPreview.innerHTML = `<div class="pt-4 border-t border-[#E2E8F0] space-y-1.5"><p class="font-serif-display text-sm font-bold text-[#0D1015]">${esc(
-          state.customerProfile.name
-        )}</p><p class="font-mono-tech text-xs text-[#0077CC]">${esc(
-          state.customerProfile.phone || 'No phone number added'
-        )}</p><p class="text-xs text-[#0D1015]">${esc(formattedAddr || 'No delivery address added')}</p></div>`;
-      }
+      // Home Delivery Address Preview
+      const formattedAddr = [state.customerProfile.address, state.customerProfile.city]
+        .map((s) => String(s || '').trim())
+        .filter(Boolean)
+        .join(', ');
+      setTxt('client-home-addr-name', state.customerProfile.name);
+      setTxt('client-home-addr-phone', state.customerProfile.phone || 'No phone number added');
+      setTxt('client-home-addr-line', formattedAddr || 'No delivery address added');
 
+      // Home Live Catalog Feed
       const homeCatalogFeedEl = document.getElementById('client-home-catalog-feed');
       if (homeCatalogFeedEl) {
-        homeCatalogFeedEl.innerHTML = state.catalog
-          .slice(0, 6)
-          .map((prod) => {
-            const card = formatSimplifiedProductCardData(prod);
-            const imgUrl = (card.image || 'assets/images/category_dining_tables.jpg').replace(/^\//, '');
-            return `<div class="p-4 rounded-2xl border border-[#BCE3FF] bg-[#F8FBFF] flex flex-col justify-between gap-3 h-full"><div class="flex items-start gap-3.5"><img src="${esc(
-              imgUrl
-            )}" alt="${esc(card.name)}" class="w-16 h-16 rounded-xl object-cover border border-[#BCE3FF] shrink-0" /><div class="min-w-0 flex-1"><div class="flex items-center justify-between gap-1"><span class="text-[11px] font-semibold uppercase tracking-wider text-[#0077CC]">${esc(
-              card.categoryName
-            )}</span><span class="text-[11px] font-mono-tech font-semibold text-emerald-700">${esc(
-              card.availabilityLabel
-            )}</span></div><h3 class="font-serif-display text-sm font-bold text-[#0D1015] truncate mt-0.5">${esc(
-              card.name
-            )}</h3><p class="font-mono-tech text-sm font-bold text-[#0095FF] mt-1">${usd(
-              card.sellingPrice
-            )}</p></div></div><div class="pt-2 border-t border-[#E2E8F0] mt-auto"><a href="catalog.html?category=${encodeURIComponent(
-              prod.categoryId || 'all'
-            )}&product=${encodeURIComponent(
-              card.id
-            )}" class="block px-3 py-2 rounded-xl bg-[#0D1015] hover:bg-[#0095FF] text-white text-xs font-semibold transition-colors text-center">${esc(
-              card.ctaLabel
-            )}</a></div></div>`;
-          })
-          .join('');
+        const cards = state.catalog.slice(0, 6).map((prod) => {
+          const card = formatSimplifiedProductCardData(prod);
+          const node = cloneTpl('tpl-client-catalog-card');
+          if (!node) return document.createElement('div');
+          const img = node.querySelector('[data-role="cat-img"]');
+          if (img) {
+            img.src = (card.image || 'assets/images/category_dining_tables.jpg').replace(/^\//, '');
+            img.alt = card.name;
+          }
+          setRole(node, 'cat-name', card.categoryName);
+          setRole(node, 'cat-avail', card.availabilityLabel);
+          setRole(node, 'prod-name', card.name);
+          setRole(node, 'prod-price', usd(card.sellingPrice));
+          const link = node.querySelector('[data-role="prod-link"]');
+          if (link) {
+            link.href = `catalog.html?category=${encodeURIComponent(prod.categoryId || 'all')}&product=${encodeURIComponent(card.id)}`;
+            link.textContent = card.ctaLabel;
+          }
+          return node;
+        });
+        homeCatalogFeedEl.replaceChildren(...cards);
       }
 
       const setInputVal = (id, val) => {
@@ -982,7 +1129,7 @@ export function createDashboard({
       setInputVal('client-input-notes', state.customerProfile.notes);
       syncCustomerAvatarDOM(state.customerProfile);
 
-      // Custom Commission Builder
+      // Custom Commission Builder (Populates static form in HTML)
       const customOrderCardEl = document.getElementById('client-custom-order-card');
       setTxt(
         'client-toggle-custom-order-btn',
@@ -1002,218 +1149,150 @@ export function createDashboard({
           const extraCost = Math.max(250, Math.round(Number(selectedMat?.unitCost || 0) * 4));
           const estimatedTotal = basePrice + extraCost;
 
-          customOrderCardEl.innerHTML = `<form id="client-custom-commission-form" novalidate class="space-y-5"><div class="pb-4 border-b border-[#E2E8F0] flex flex-col sm:flex-row sm:items-center justify-between gap-2"><div><p class="font-mono-tech text-xs uppercase tracking-widest text-[#0077CC] font-bold">Bespoke Workshop Commission</p><h3 class="font-serif-display text-lg font-bold text-[#0D1015] mt-0.5">Commission a Custom-Built Piece from Workshop Materials</h3></div><div class="sm:text-right"><p class="font-mono-tech text-xl font-bold text-[#0095FF]">${usd(
-            estimatedTotal
-          )}</p></div></div><div class="grid sm:grid-cols-2 lg:grid-cols-3 gap-4"><div><label for="cust-ord-product" class="block text-xs font-semibold text-[#0D1015] mb-1">Base Catalog Design</label><select id="cust-ord-product" class="w-full px-3.5 py-2.5 rounded-xl border border-[#BCE3FF] bg-[#F8FBFF] text-xs font-semibold">${state.catalog
-            .map(
-              (p) =>
-                `<option value="${esc(p.id)}" ${p.id === selectedBaseProd?.id ? 'selected' : ''}>${esc(p.name)} (${usd(
-                  p.effectivePrice
-                )})</option>`
-            )
-            .join(
-              ''
-            )}</select></div><div><label for="cust-ord-material" class="block text-xs font-semibold text-[#0D1015] mb-1">Workshop Raw Material</label><select id="cust-ord-material" class="w-full px-3.5 py-2.5 rounded-xl border border-[#BCE3FF] bg-[#F8FBFF] text-xs font-semibold">${state.materials
-            .map(
-              (m) =>
-                `<option value="${esc(m.id)}" ${m.id === selectedMat?.id ? 'selected' : ''}>${esc(m.name)} (${
-                  m.stockQuantity
-                } ${esc(m.unit)} avail)</option>`
-            )
-            .join(
-              ''
-            )}</select></div><div><label for="cust-ord-finish" class="block text-xs font-semibold text-[#0D1015] mb-1">Color / Oil Finish</label><input id="cust-ord-finish" type="text" value="${esc(
-            state.clientCustomOrderInput.colorFinish || 'Hand-Rubbed Tung Oil'
-          )}" class="w-full px-3.5 py-2.5 rounded-xl border border-[#BCE3FF] bg-[#F8FBFF] text-xs" /></div><div><label for="cust-ord-length" class="block text-xs font-semibold text-[#0D1015] mb-1">Length (cm)</label><input id="cust-ord-length" type="number" value="${esc(
-            state.clientCustomOrderInput.lengthCm || '260'
-          )}" class="w-full px-3.5 py-2.5 rounded-xl border border-[#BCE3FF] bg-[#F8FBFF] font-mono-tech text-xs" /></div><div><label for="cust-ord-width" class="block text-xs font-semibold text-[#0D1015] mb-1">Width (cm)</label><input id="cust-ord-width" type="number" value="${esc(
-            state.clientCustomOrderInput.widthCm || '105'
-          )}" class="w-full px-3.5 py-2.5 rounded-xl border border-[#BCE3FF] bg-[#F8FBFF] font-mono-tech text-xs" /></div><div><label for="cust-ord-height" class="block text-xs font-semibold text-[#0D1015] mb-1">Height (cm)</label><input id="cust-ord-height" type="number" value="${esc(
-            state.clientCustomOrderInput.heightCm || '76'
-          )}" class="w-full px-3.5 py-2.5 rounded-xl border border-[#BCE3FF] bg-[#F8FBFF] font-mono-tech text-xs" /></div></div><div><label for="cust-ord-notes" class="block text-xs font-semibold text-[#0D1015] mb-1">Joinery &amp; Architectural Notes</label><input id="cust-ord-notes" type="text" value="${esc(
-            state.clientCustomOrderInput.notes || ''
-          )}" class="w-full px-3.5 py-2.5 rounded-xl border border-[#BCE3FF] bg-[#F8FBFF] text-xs" /></div><p id="client-custom-commission-error" class="hidden text-xs font-semibold text-rose-700"></p><div class="flex items-center justify-end gap-3 pt-2"><button type="button" id="client-cancel-custom-commission-btn" class="px-4 py-2 rounded-xl border border-[#BCE3FF] text-xs font-semibold cursor-pointer">Cancel</button><button type="submit" class="px-5 py-2.5 rounded-xl bg-[#0095FF] hover:bg-[#0077CC] text-white text-xs font-semibold cursor-pointer">Submit Custom Commission (${usd(
-            estimatedTotal
-          )})</button></div></form>`;
-
-          document.getElementById('cust-ord-product')?.addEventListener('change', (e) => {
-            state.clientCustomOrderInput.productId = e.target.value;
-            renderDashboardContent();
-          });
-          document.getElementById('cust-ord-material')?.addEventListener('change', (e) => {
-            state.clientCustomOrderInput.materialId = e.target.value;
-            renderDashboardContent();
-          });
-          document.getElementById('client-cancel-custom-commission-btn')?.addEventListener('click', () => {
-            state.clientCustomOrderOpen = false;
-            renderDashboardContent();
-          });
-          document.getElementById('client-custom-commission-form')?.addEventListener('submit', async (e) => {
-            e.preventDefault();
-            const customInput = {
-              productId: document.getElementById('cust-ord-product')?.value || '',
-              materialId: document.getElementById('cust-ord-material')?.value || '',
-              colorFinish: document.getElementById('cust-ord-finish')?.value || 'Natural Oil',
-              lengthCm: document.getElementById('cust-ord-length')?.value || 240,
-              widthCm: document.getElementById('cust-ord-width')?.value || 100,
-              heightCm: document.getElementById('cust-ord-height')?.value || 75,
-              notes: document.getElementById('cust-ord-notes')?.value || '',
-              extraCost,
-              materialQtyUsed: 2,
-            };
-            const serverRes = await syncDatabaseStore('create_custom_order', {
-              customInput,
-              customerProfile: { name: state.customerProfile.name, email: userEmail },
-            });
-            if (serverRes && serverRes.ok && serverRes.order) {
-              if (Array.isArray(serverRes.orders)) state.orders = serverRes.orders;
-              if (Array.isArray(serverRes.materials)) state.materials = serverRes.materials;
-              if (Array.isArray(serverRes.inventoryTransactions))
-                state.inventoryTransactions = serverRes.inventoryTransactions;
-              state.clientCustomOrderOpen = false;
-              showClientBanner(`Custom Commission #${serverRes.order.orderNumber} submitted!`);
-              renderDashboardContent();
-              return;
-            }
-            const res = createCustomOrderRequest({
-              catalog: state.catalog,
-              materials: state.materials,
-              customerProfile: { name: state.customerProfile.name, email: userEmail },
-              customInput,
-            });
-            if (!res.ok) {
-              const errEl = document.getElementById('client-custom-commission-error');
-              if (errEl) {
-                errEl.textContent = res.errorMessage;
-                errEl.classList.remove('hidden');
-              }
-              return;
-            }
-            state.orders.unshift(res.order);
-            saveOrdersToStorage();
-            state.clientCustomOrderOpen = false;
-            showClientBanner(`Custom Commission #${res.order.orderNumber} submitted!`);
-            renderDashboardContent();
-          });
+          setTxt('cust-ord-estimated-total', usd(estimatedTotal));
+          setTxt('client-submit-custom-commission-btn', `Submit Custom Commission (${usd(estimatedTotal)})`);
+          const prodSelect = document.getElementById('cust-ord-product');
+          if (prodSelect) {
+            prodSelect.replaceChildren(
+              ...state.catalog.map((p) =>
+                createOption(p.id, `${p.name} (${usd(p.effectivePrice)})`, p.id === selectedBaseProd?.id)
+              )
+            );
+          }
+          const matSelect = document.getElementById('cust-ord-material');
+          if (matSelect) {
+            matSelect.replaceChildren(
+              ...state.materials.map((m) =>
+                createOption(m.id, `${m.name} (${m.stockQuantity} ${m.unit} avail)`, m.id === selectedMat?.id)
+              )
+            );
+          }
         }
       }
 
       // Customer Orders List
       const friendlyOrdersEl = document.getElementById('client-orders-friendly-list');
       if (friendlyOrdersEl) {
-        friendlyOrdersEl.innerHTML =
-          displayOrders.length === 0
-            ? `<div class="bg-white rounded-3xl border border-[#BCE3FF] p-8 text-center space-y-3"><p class="font-serif-display text-lg font-bold text-[#0D1015]">You Have Not Placed Any Orders Yet</p></div>`
-            : displayOrders
-                .map((ord) => {
-                  const matchedProd = state.catalog.find((p) => p.id === ord.furnitureId) || state.catalog[0];
-                  const imgUrl = (matchedProd ? matchedProd.image : 'assets/images/category_dining_tables.jpg').replace(
-                    /^\//,
-                    ''
-                  );
-                  const isCompleted = isOrderCompleted(ord);
-                  let friendlyStep = 1;
-                  if (/Joinery|Finishing|Timber/i.test(ord.status)) friendlyStep = 2;
-                  if (/Quality/i.test(ord.status)) friendlyStep = 3;
-                  if (isCompleted || /Dispatched|Delivered/i.test(ord.status)) friendlyStep = 4;
-                  const pct = Math.round((friendlyStep / 4) * 100);
-                  const totalAmt = Number(ord.totalAmount || 0);
-                  const paidAmt = Number(ord.depositPaid ?? totalAmt);
-                  const balanceDue = Math.max(0, totalAmt - paidAmt);
-                  const isCancelled = /Cancelled/i.test(String(ord.status || '')) || ord.sqlStatus === 'Cancelled';
-                  const isCancelPending = Boolean(ord.cancellationRequested) && !isCancelled;
-                  const canCancel = friendlyStep < 4 && !isCancelled && !isCancelPending && !isCompleted;
+        if (displayOrders.length === 0) {
+          const empty = document.createElement('div');
+          empty.className = 'bg-white rounded-3xl border border-[#BCE3FF] p-8 text-center font-serif-display text-lg font-bold text-[#0D1015]';
+          empty.textContent = 'You Have Not Placed Any Orders Yet';
+          friendlyOrdersEl.replaceChildren(empty);
+        } else {
+          const orderCards = displayOrders.map((ord) => {
+            const node = cloneTpl('tpl-client-order-card');
+            if (!node) return document.createElement('article');
+            const matchedProd = state.catalog.find((p) => p.id === ord.furnitureId) || state.catalog[0];
+            const imgUrl = (matchedProd ? matchedProd.image : 'assets/images/category_dining_tables.jpg').replace(/^\//, '');
+            const isCompleted = isOrderCompleted(ord);
+            let friendlyStep = 1;
+            if (/Joinery|Finishing|Timber/i.test(ord.status)) friendlyStep = 2;
+            if (/Quality/i.test(ord.status)) friendlyStep = 3;
+            if (isCompleted || /Dispatched|Delivered/i.test(ord.status)) friendlyStep = 4;
+            const pct = Math.round((friendlyStep / 4) * 100);
+            const totalAmt = Number(ord.totalAmount || 0);
+            const paidAmt = Number(ord.depositPaid ?? totalAmt);
+            const balanceDue = Math.max(0, totalAmt - paidAmt);
+            const isCancelled = /Cancelled/i.test(String(ord.status || '')) || ord.sqlStatus === 'Cancelled';
+            const isCancelPending = Boolean(ord.cancellationRequested) && !isCancelled;
+            const canCancel = friendlyStep < 4 && !isCancelled && !isCancelPending && !isCompleted;
 
-                  return `<article class="bg-white rounded-3xl border border-[#BCE3FF] p-6 sm:p-7 shadow-2xs space-y-5"><div class="flex flex-col sm:flex-row gap-5 items-start sm:items-center justify-between"><div class="flex items-center gap-4"><img src="${esc(
-                    imgUrl
-                  )}" alt="${esc(ord.furnitureName)}" class="w-20 h-20 rounded-2xl object-cover border border-[#BCE3FF] shrink-0" /><div><div class="flex flex-wrap items-center gap-2 text-xs"><span class="font-semibold ${
-                    isCancelled ? 'text-rose-700' : isCompleted ? 'text-emerald-700' : 'text-[#0077CC]'
-                  }">${esc(ord.status)}</span><span>·</span><span class="font-mono-tech text-[#64748B]">Order #${esc(
-                    ord.orderNumber
-                  )}</span>${
-                    isCompleted
-                      ? `<span class="px-2.5 py-0.5 rounded-full bg-emerald-100 text-emerald-800 border border-emerald-300 text-[11px] font-bold">✓ Completed · In Completed Transactions</span>`
-                      : ''
-                  }${
-                    isCancelPending
-                      ? `<span class="px-2.5 py-0.5 rounded-full bg-amber-100 text-amber-800 border border-amber-300 text-[11px] font-bold">Cancellation Pending Admin Approval</span>`
-                      : ''
-                  }</div><h3 class="font-serif-display text-xl font-bold text-[#0D1015] mt-1">${esc(
-                    ord.furnitureName
-                  )}</h3><p class="text-xs text-[#475569] mt-0.5">Color Finish: <span class="font-semibold text-[#0D1015]">${esc(
-                    ord.selectedFinish
-                  )}</span> · Size: ${esc(ord.customDimensions)}</p></div></div><div class="sm:text-right shrink-0"><p class="text-xs text-[#64748B]">${
-                    balanceDue > 0 ? `Paid ${usd(paidAmt)} · Balance Due ${usd(balanceDue)}` : 'Paid in Full'
-                  }</p><p class="font-mono-tech text-2xl font-bold text-[#0095FF]">${usd(
-                    totalAmt
-                  )}</p></div></div><div class="p-4 rounded-2xl bg-[#F8FBFF] border border-[#E2E8F0] space-y-3"><div class="flex items-center justify-between text-xs"><span class="font-semibold text-[#0D1015]">Workshop &amp; Delivery Progress</span><span class="font-mono-tech font-bold ${
-                    isCancelled ? 'text-rose-600' : 'text-[#0095FF]'
-                  }">${
-                    isCancelled ? 'Order Cancelled' : `${pct}% Complete`
-                  }</span></div><div class="w-full h-2.5 rounded-full bg-[#E2E8F0] overflow-hidden"><div class="h-full rounded-full ${
-                    isCancelled ? 'bg-rose-500' : 'bg-[#0095FF]'
-                  }" style="width: ${
-                    isCancelled ? 100 : pct
-                  }%"></div></div><div class="grid grid-cols-2 sm:grid-cols-4 gap-2 pt-1">${FRIENDLY_CUSTOMER_STEPS.map(
-                    (label, idx) => {
-                      const active = !isCancelled && idx + 1 <= friendlyStep;
-                      return `<div class="flex items-center gap-1.5 text-[11px] ${
-                        active ? 'text-[#0D1015] font-bold' : 'text-[#94A3B8]'
-                      }"><span class="w-4 h-4 rounded-full flex items-center justify-center text-[10px] ${
-                        active ? 'bg-[#0095FF] text-white' : 'bg-[#E2E8F0] text-[#64748B]'
-                      }">${active ? '✓' : idx + 1}</span><span>${esc(label)}</span></div>`;
-                    }
-                  ).join('')}</div></div><div class="flex flex-wrap items-center justify-between gap-3 pt-1 text-xs">${
-                    balanceDue > 0 && !isCancelled
-                      ? `<button type="button" data-client-pay-order="${esc(
-                          ord.orderNumber
-                        )}" class="px-3.5 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold cursor-pointer">Pay Remaining Balance (${usd(
-                          balanceDue
-                        )})</button>`
-                      : ''
-                  }${
-                    canCancel
-                      ? `<button type="button" data-client-cancel-order="${esc(
-                          ord.orderNumber
-                        )}" class="px-3 py-1.5 rounded-xl border border-rose-200 bg-rose-50 hover:bg-rose-100 text-rose-700 text-xs font-semibold cursor-pointer">Request Cancel Order</button>`
-                      : ''
-                  }<a href="${ADMIN_MESSENGER_PLACEHOLDER_URL}" target="_blank" rel="noopener noreferrer" class="font-semibold text-[#0095FF] hover:underline">Ask Owner About This Order on Messenger ↗</a></div></article>`;
-                })
-                .join('');
-
-        friendlyOrdersEl.querySelectorAll('[data-client-pay-order]').forEach((btn) =>
-          btn.addEventListener('click', async () => {
-            const orderNumber = btn.getAttribute('data-client-pay-order') || '';
-            const serverRes = await syncDatabaseStore('record_order_payment', { orderNumber, paymentMethod: 'Card' });
-            if (serverRes?.ok && Array.isArray(serverRes.orders)) {
-              state.orders = serverRes.orders;
-            } else {
-              const res = recordCustomerOrderPayment({ orders: state.orders, orderNumber, paymentMethod: 'Card' });
-              if (!res.ok) return showClientBanner(res.errorMessage || 'Unable to process payment.');
-              state.orders = res.updatedOrders;
-              saveOrdersToStorage();
+            const img = node.querySelector('[data-role="ord-img"]');
+            if (img) {
+              img.src = imgUrl;
+              img.alt = ord.furnitureName;
             }
-            showClientBanner(`Paid remaining balance for Order #${orderNumber}.`);
-            renderDashboardContent();
-          })
-        );
-
-        friendlyOrdersEl.querySelectorAll('[data-client-cancel-order]').forEach((btn) =>
-          btn.addEventListener('click', async () => {
-            const orderNumber = btn.getAttribute('data-client-cancel-order') || '';
-            const serverRes = await syncDatabaseStore('request_order_cancellation', { orderNumber });
-            if (serverRes?.ok && Array.isArray(serverRes.orders)) {
-              state.orders = serverRes.orders;
-            } else {
-              const res = requestOrderCancellation({ orders: state.orders, orderNumber });
-              if (!res.ok) return showClientBanner(res.errorMessage || 'Unable to request cancellation.');
-              state.orders = res.updatedOrders;
-              saveOrdersToStorage();
+            const statusEl = setRole(node, 'ord-status', ord.status);
+            if (statusEl) {
+              statusEl.className = `font-semibold ${
+                isCancelled ? 'text-rose-700' : isCompleted ? 'text-emerald-700' : 'text-[#0077CC]'
+              }`;
             }
-            showClientBanner(`Cancellation request for Order #${orderNumber} sent to Admin.`);
-            renderDashboardContent();
-          })
-        );
+            setRole(node, 'ord-number', `Order #${ord.orderNumber}`);
+            node.querySelector('[data-role="ord-completed-badge"]')?.classList.toggle('hidden', !isCompleted);
+            node.querySelector('[data-role="ord-cancel-badge"]')?.classList.toggle('hidden', !isCancelPending);
+            setRole(node, 'ord-name', ord.furnitureName);
+            setRole(node, 'ord-finish', ord.selectedFinish);
+            setRole(node, 'ord-dims', ord.customDimensions);
+            setRole(
+              node,
+              'ord-payment-summary',
+              balanceDue > 0 ? `Paid ${usd(paidAmt)} · Balance Due ${usd(balanceDue)}` : 'Paid in Full'
+            );
+            setRole(node, 'ord-total', usd(totalAmt));
+
+            const pctLabel = setRole(node, 'ord-pct-label', isCancelled ? 'Order Cancelled' : `${pct}% Complete`);
+            if (pctLabel) pctLabel.className = `font-mono-tech font-bold ${isCancelled ? 'text-rose-600' : 'text-[#0095FF]'}`;
+            const pctBar = node.querySelector('[data-role="ord-pct-bar"]');
+            if (pctBar) {
+              pctBar.className = `h-full rounded-full ${isCancelled ? 'bg-rose-500' : 'bg-[#0095FF]'}`;
+              pctBar.style.width = `${isCancelled ? 100 : pct}%`;
+            }
+
+            const stepsEl = node.querySelector('[data-role="ord-steps"]');
+            if (stepsEl) {
+              const stepNodes = FRIENDLY_CUSTOMER_STEPS.map((label, idx) => {
+                const stepNode = cloneTpl('tpl-client-order-step');
+                if (!stepNode) return document.createElement('div');
+                const active = !isCancelled && idx + 1 <= friendlyStep;
+                stepNode.className = `flex items-center gap-1.5 text-[11px] ${active ? 'text-[#0D1015] font-bold' : 'text-[#94A3B8]'}`;
+                const dot = setRole(stepNode, 'step-dot', active ? '✓' : String(idx + 1));
+                if (dot) {
+                  dot.className = `w-4 h-4 rounded-full flex items-center justify-center text-[10px] ${
+                    active ? 'bg-[#0095FF] text-white' : 'bg-[#E2E8F0] text-[#64748B]'
+                  }`;
+                }
+                setRole(stepNode, 'step-label', label);
+                return stepNode;
+              });
+              stepsEl.replaceChildren(...stepNodes);
+            }
+
+            const payBtn = node.querySelector('[data-role="ord-pay-btn"]');
+            if (payBtn && balanceDue > 0 && !isCancelled) {
+              payBtn.classList.remove('hidden');
+              payBtn.textContent = `Pay Remaining Balance (${usd(balanceDue)})`;
+              payBtn.addEventListener('click', async () => {
+                const serverRes = await syncDatabaseStore('record_order_payment', {
+                  orderNumber: ord.orderNumber,
+                  paymentMethod: 'Card',
+                });
+                if (serverRes?.ok && Array.isArray(serverRes.orders)) state.orders = serverRes.orders;
+                else {
+                  const res = recordCustomerOrderPayment({ orders: state.orders, orderNumber: ord.orderNumber, paymentMethod: 'Card' });
+                  if (!res.ok) return showClientBanner(res.errorMessage || 'Unable to process payment.');
+                  state.orders = res.updatedOrders;
+                  saveOrdersToStorage();
+                }
+                showClientBanner(`Paid remaining balance for Order #${ord.orderNumber}.`);
+                renderDashboardContent();
+              });
+            }
+
+            const cancelBtn = node.querySelector('[data-role="ord-cancel-btn"]');
+            if (cancelBtn && canCancel) {
+              cancelBtn.classList.remove('hidden');
+              cancelBtn.addEventListener('click', async () => {
+                const serverRes = await syncDatabaseStore('request_order_cancellation', { orderNumber: ord.orderNumber });
+                if (serverRes?.ok && Array.isArray(serverRes.orders)) state.orders = serverRes.orders;
+                else {
+                  const res = requestOrderCancellation({ orders: state.orders, orderNumber: ord.orderNumber });
+                  if (!res.ok) return showClientBanner(res.errorMessage || 'Unable to request cancellation.');
+                  state.orders = res.updatedOrders;
+                  saveOrdersToStorage();
+                }
+                showClientBanner(`Cancellation request for Order #${ord.orderNumber} sent to Admin.`);
+                renderDashboardContent();
+              });
+            }
+
+            const msgLink = node.querySelector('[data-role="ord-messenger-link"]');
+            if (msgLink) msgLink.href = ADMIN_MESSENGER_PLACEHOLDER_URL;
+
+            return node;
+          });
+          friendlyOrdersEl.replaceChildren(...orderCards);
+        }
       }
 
       // Customer Completed Transactions Table
@@ -1221,40 +1300,23 @@ export function createDashboard({
       if (txTbody) {
         const totalVol = completedTransactions.reduce((sum, t) => sum + Number(t.amount || 0), 0);
         setTxt('client-transactions-total', usd(totalVol));
-        txTbody.innerHTML =
-          completedTransactions.length === 0
-            ? `<tr><td colspan="6" class="py-8 text-center text-xs text-[#64748B]">No completed transaction orders yet.</td></tr>`
-            : completedTransactions
-                .map(
-                  (tx) =>
-                    `<tr data-testid="client-transaction-row-${esc(
-                      tx.orderNumber
-                    )}"><td class="font-mono-tech text-xs font-bold text-[#0D1015] whitespace-nowrap">${esc(
-                      tx.txId
-                    )}</td><td class="font-mono-tech text-xs font-bold text-[#0095FF] whitespace-nowrap">#${esc(
-                      tx.orderNumber
-                    )}</td><td class="font-mono-tech text-xs text-[#475569] whitespace-nowrap">${esc(
-                      tx.date
-                    )}</td><td class="admin-col-primary"><p class="admin-table-title">${esc(
-                      tx.piece
-                    )}</p><p class="admin-table-sub">${esc(tx.finish)} · ${esc(
-                      tx.dimensions || 'Standard Dimensions'
-                    )}</p></td><td class="whitespace-nowrap"><span class="admin-status-badge admin-status-in-stock"><span class="admin-status-badge-dot"></span>${esc(
-                      tx.status || 'Completed'
-                    )}</span></td><td class="text-right font-mono-tech font-bold text-[#0D1015] whitespace-nowrap">${usd(
-                      tx.amount
-                    )}</td></tr>`
-                )
-                .join('');
+        const rows = completedTransactions.map((tx) => {
+          const tr = cloneTpl('tpl-client-tx-row');
+          if (!tr) return document.createElement('tr');
+          tr.setAttribute('data-testid', `client-transaction-row-${tx.orderNumber}`);
+          setRole(tr, 'tx-id', tx.txId);
+          setRole(tr, 'tx-ord', `#${tx.orderNumber}`);
+          setRole(tr, 'tx-date', tx.date);
+          setRole(tr, 'tx-piece', tx.piece);
+          setRole(tr, 'tx-meta', `${tx.finish} · ${tx.dimensions || 'Standard Dimensions'}`);
+          setRole(tr, 'tx-status', tx.status || 'Completed');
+          setRole(tr, 'tx-amount', usd(tx.amount));
+          return tr;
+        });
+        txTbody.replaceChildren(...rows);
       }
 
       // Customer Cart Workspace
-      const cartSelect = document.getElementById('client-cart-add-select');
-      if (cartSelect) {
-        cartSelect.innerHTML = state.catalog
-          .map((p) => `<option value="${esc(p.id)}">${esc(p.name)} (${usd(p.effectivePrice)})</option>`)
-          .join('');
-      }
       const cartEmptyEl = document.getElementById('client-cart-empty-state');
       const cartWorkspaceEl = document.getElementById('client-cart-workspace');
       const cartItemsListEl = document.getElementById('client-cart-items-list');
@@ -1262,7 +1324,7 @@ export function createDashboard({
         if (state.cartItems.length === 0) {
           cartEmptyEl.classList.remove('hidden');
           cartWorkspaceEl.classList.add('hidden');
-          cartItemsListEl.innerHTML = '';
+          cartItemsListEl.replaceChildren();
           state.appliedVoucher = null;
         } else {
           cartEmptyEl.classList.add('hidden');
@@ -1286,51 +1348,42 @@ export function createDashboard({
           }));
           const totals = calculateOrderPricing(linePrices, state.appliedVoucher);
 
-          cartItemsListEl.innerHTML = state.cartItems
-            .map((entry, idx) => {
-              const item = entry.product;
-              const imgUrl = (item.image || 'assets/images/category_living_lounge.jpg').replace(/^\//, '');
-              const pricing = computeVariantPricing(item, entry.finish);
-              const breakdown = totals.lineBreakdowns[idx] || {
-                rawLineTotal: pricing.effectivePrice * entry.quantity,
-                finalLineTotal: pricing.effectivePrice * entry.quantity,
-                lineDiscount: 0,
-                isVoucherEligible: false,
-              };
-              return `<article class="bg-white rounded-3xl border border-[#BCE3FF] p-5 shadow-2xs flex flex-col sm:flex-row gap-4 items-start sm:items-center justify-between"><div class="flex items-center gap-4 min-w-0"><img src="${esc(
-                imgUrl
-              )}" alt="${esc(
-                item.name
-              )}" class="w-20 h-20 rounded-2xl object-cover border border-[#BCE3FF] shrink-0" /><div class="min-w-0 space-y-1"><h3 class="font-serif-display text-lg font-bold text-[#0D1015] truncate">${esc(
-                item.name
-              )}</h3><p class="text-xs text-[#475569]">Finish: <span class="font-semibold text-[#0D1015]">${esc(
-                entry.finish
-              )}</span> · ${usd(pricing.effectivePrice)} each</p><div class="flex items-center gap-3 pt-1"><div class="inline-flex items-center rounded-xl border border-[#BCE3FF] bg-[#F8FBFF]"><button type="button" data-client-cart-qty-idx="${idx}" data-client-cart-delta="-1" class="px-3 py-1 text-xs font-bold cursor-pointer">−</button><span class="px-3 py-1 font-mono-tech text-xs font-bold">${
-                entry.quantity
-              }</span><button type="button" data-client-cart-qty-idx="${idx}" data-client-cart-delta="1" class="px-3 py-1 text-xs font-bold cursor-pointer">+</button></div><button type="button" data-client-cart-remove="${idx}" class="text-xs font-semibold text-rose-700 hover:underline cursor-pointer">Remove</button></div></div></div><div class="sm:text-right shrink-0"><p class="font-mono-tech text-lg font-bold text-[#0D1015]">${usd(
-                breakdown.finalLineTotal
-              )}</p></div></article>`;
-            })
-            .join('');
+          const itemNodes = state.cartItems.map((entry, idx) => {
+            const node = cloneTpl('tpl-client-cart-item');
+            if (!node) return document.createElement('article');
+            const item = entry.product;
+            const pricing = computeVariantPricing(item, entry.finish);
+            const breakdown = totals.lineBreakdowns[idx] || {
+              finalLineTotal: pricing.effectivePrice * entry.quantity,
+            };
+            const img = node.querySelector('[data-role="cart-img"]');
+            if (img) {
+              img.src = (item.image || 'assets/images/category_living_lounge.jpg').replace(/^\//, '');
+              img.alt = item.name;
+            }
+            setRole(node, 'cart-name', item.name);
+            setRole(node, 'cart-finish', entry.finish);
+            setRole(node, 'cart-unit-price', usd(pricing.effectivePrice));
+            setRole(node, 'cart-qty', String(entry.quantity));
+            setRole(node, 'cart-line-total', usd(breakdown.finalLineTotal));
 
-          cartItemsListEl.querySelectorAll('[data-client-cart-qty-idx]').forEach((btn) =>
-            btn.addEventListener('click', () => {
-              const idx = Number(btn.getAttribute('data-client-cart-qty-idx'));
-              const delta = Number(btn.getAttribute('data-client-cart-delta'));
+            const changeQty = (delta) => {
               if (!state.cartItems[idx]) return;
               state.cartItems[idx].quantity += delta;
               if (state.cartItems[idx].quantity <= 0) state.cartItems.splice(idx, 1);
               saveCartToStorage();
               renderDashboardContent();
-            })
-          );
-          cartItemsListEl.querySelectorAll('[data-client-cart-remove]').forEach((btn) =>
-            btn.addEventListener('click', () => {
-              state.cartItems.splice(Number(btn.getAttribute('data-client-cart-remove')), 1);
+            };
+            node.querySelector('[data-role="cart-dec"]')?.addEventListener('click', () => changeQty(-1));
+            node.querySelector('[data-role="cart-inc"]')?.addEventListener('click', () => changeQty(1));
+            node.querySelector('[data-role="cart-remove"]')?.addEventListener('click', () => {
+              state.cartItems.splice(idx, 1);
               saveCartToStorage();
               renderDashboardContent();
-            })
-          );
+            });
+            return node;
+          });
+          cartItemsListEl.replaceChildren(...itemNodes);
 
           setTxt('client-cart-subtotal', usd(totals.rawSubtotal));
           const voucherRow = document.getElementById('client-cart-voucher-row');
@@ -1347,65 +1400,57 @@ export function createDashboard({
       // Customer Voucher Wallet
       const friendlyVouchersEl = document.getElementById('client-vouchers-friendly-list');
       if (friendlyVouchersEl) {
-        friendlyVouchersEl.innerHTML =
-          displayVouchers.length === 0
-            ? `<div class="col-span-full p-8 rounded-3xl border border-[#BCE3FF] bg-[#F8FBFF] text-center"><p class="font-serif-display text-lg font-bold text-[#0D1015]">No Vouchers Assigned Yet</p></div>`
-            : displayVouchers
-                .map((v) => {
-                  const statusInfo = computeVoucherStatusInfo(v);
-                  const issuedInfo = formatVoucherIssuedDisplay(v);
-                  const expiryInfo = formatVoucherExpiryDisplay(v);
-                  const discountAmt = Number(v.discountAmount ?? v.discountValue ?? 0);
-                  return `<div class="p-5 sm:p-6 rounded-3xl border border-[#BCE3FF] bg-white space-y-4 shadow-2xs flex flex-col justify-between"><div class="space-y-3"><div class="flex items-start justify-between gap-2"><div><span class="inline-flex items-center px-2.5 py-1 rounded-lg bg-[#EBF6FF] border border-[#BCE3FF] font-mono-tech text-xs font-bold text-[#0077CC]">${usd(
-                    discountAmt
-                  )} OFF FIXED DISCOUNT</span><h3 class="font-serif-display text-base font-bold text-[#0D1015] mt-2">${esc(
-                    v.furnitureName || v.productName
-                  )}</h3></div><span class="admin-status-badge ${
-                    statusInfo.badgeClass
-                  }"><span class="admin-status-badge-dot"></span>${esc(
-                    statusInfo.status
-                  )}</span></div><div class="flex items-center justify-between gap-2 p-3 rounded-xl bg-[#F8FBFF] border border-[#BCE3FF]"><code class="font-mono-tech text-sm font-bold text-[#0D1015]">${esc(
-                    v.code
-                  )}</code><button type="button" data-copy-voucher="${esc(
-                    v.code
-                  )}" class="px-3 py-1.5 rounded-lg bg-[#EBF6FF] text-[#0077CC] text-xs font-semibold cursor-pointer">Copy Code</button></div><div class="grid grid-cols-2 gap-2.5 p-3 rounded-xl bg-slate-50 border border-slate-200 text-xs"><div><span class="block text-[10px] font-semibold uppercase text-slate-400">Issued (PHT)</span><span class="font-semibold text-slate-800 block mt-0.5">${esc(
-                    issuedInfo.primary
-                  )}</span></div><div><span class="block text-[10px] font-semibold uppercase text-slate-400">Expires (PHT)</span><span class="font-semibold text-slate-800 block mt-0.5">${esc(
-                    expiryInfo.primary
-                  )}</span></div></div></div><div class="pt-3 border-t border-slate-100 flex items-center justify-between gap-2"><span data-voucher-countdown="${esc(
-                    v.id
-                  )}" class="vch-remaining-badge ${
-                    statusInfo.isUsable ? 'vch-remaining-active' : 'vch-remaining-inactive'
-                  }">${esc(statusInfo.remainingLabel)}</span>${
-                    statusInfo.isUsable
-                      ? `<button type="button" data-use-voucher-product="${esc(
-                          v.furnitureId || v.productId
-                        )}" data-use-voucher-code="${esc(
-                          v.code
-                        )}" class="px-3.5 py-2 rounded-xl bg-[#0095FF] text-white text-xs font-semibold cursor-pointer">Use in Checkout →</button>`
-                      : ''
-                  }</div></div>`;
-                })
-                .join('');
+        const voucherNodes = displayVouchers.map((v) => {
+          const node = cloneTpl('tpl-client-voucher-card');
+          if (!node) return document.createElement('div');
+          const statusInfo = computeVoucherStatusInfo(v);
+          const issuedInfo = formatVoucherIssuedDisplay(v);
+          const expiryInfo = formatVoucherExpiryDisplay(v);
+          const discountAmt = Number(v.discountAmount ?? v.discountValue ?? 0);
 
-        friendlyVouchersEl.querySelectorAll('[data-use-voucher-product]').forEach((btn) =>
-          btn.addEventListener('click', () => {
-            const pid = btn.getAttribute('data-use-voucher-product');
-            const vCode = btn.getAttribute('data-use-voucher-code') || '';
-            const product = state.catalog.find((p) => p.id === pid);
-            if (product && Number(product.inStockCount ?? 0) > 0) {
-              const finish = product.defaultFinish || 'Natural Finish';
-              if (!state.cartItems.some((c) => c.product.id === product.id)) {
-                state.cartItems.push({ product, finish, quantity: 1 });
-                saveCartToStorage();
+          setRole(node, 'vch-discount', `${usd(discountAmt)} OFF FIXED DISCOUNT`);
+          setRole(node, 'vch-product', v.furnitureName || v.productName);
+          const badgeEl = node.querySelector('[data-role="vch-status-badge"]');
+          if (badgeEl) badgeEl.className = `admin-status-badge ${statusInfo.badgeClass}`;
+          setRole(node, 'vch-status-text', statusInfo.status);
+          setRole(node, 'vch-code', v.code);
+          setRole(node, 'vch-issued', issuedInfo.primary);
+          setRole(node, 'vch-expires', expiryInfo.primary);
+
+          const countdownEl = setRole(node, 'vch-countdown', statusInfo.remainingLabel);
+          if (countdownEl) {
+            countdownEl.setAttribute('data-voucher-countdown', v.id);
+            countdownEl.className = `vch-remaining-badge ${
+              statusInfo.isUsable ? 'vch-remaining-active' : 'vch-remaining-inactive'
+            }`;
+          }
+
+          node.querySelector('[data-role="vch-copy-btn"]')?.addEventListener('click', () => {
+            showClientBanner(`Copied voucher code ${v.code}.`);
+          });
+
+          const useBtn = node.querySelector('[data-role="vch-use-btn"]');
+          if (useBtn && statusInfo.isUsable) {
+            useBtn.classList.remove('hidden');
+            useBtn.addEventListener('click', () => {
+              const pid = v.furnitureId || v.productId;
+              const product = state.catalog.find((p) => p.id === pid);
+              if (product && Number(product.inStockCount ?? 0) > 0) {
+                const finish = product.defaultFinish || 'Natural Finish';
+                if (!state.cartItems.some((c) => c.product.id === product.id)) {
+                  state.cartItems.push({ product, finish, quantity: 1 });
+                  saveCartToStorage();
+                }
+                const check = validateVoucherForOrder(state.vouchers, v.code, userEmail, state.cartItems, state.catalog);
+                if (check.valid) state.appliedVoucher = check.voucher;
               }
-              const check = validateVoucherForOrder(state.vouchers, vCode, userEmail, state.cartItems, state.catalog);
-              if (check.valid) state.appliedVoucher = check.voucher;
-            }
-            document.querySelector('[data-client-tab="cart"]')?.click();
-            renderDashboardContent();
-          })
-        );
+              document.querySelector('[data-client-tab="cart"]')?.click();
+              renderDashboardContent();
+            });
+          }
+          return node;
+        });
+        friendlyVouchersEl.replaceChildren(...voucherNodes);
       }
     }
 
@@ -1433,67 +1478,58 @@ export function createDashboard({
     setTxt('admin-nav-count-orders', String(state.orders.length));
     setTxt('admin-nav-count-customers', String(customerDirectory.length));
 
-    const renderStockStatusBadge = (statusKey) => {
-      if (statusKey === 'out_of_stock')
-        return `<span class="admin-status-badge admin-status-out-of-stock"><span class="admin-status-badge-dot"></span>Out of Stock</span>`;
-      if (statusKey === 'low_stock')
-        return `<span class="admin-status-badge admin-status-low-stock"><span class="admin-status-badge-dot"></span>Low Stock</span>`;
-      return `<span class="admin-status-badge admin-status-in-stock"><span class="admin-status-badge-dot"></span>In Stock</span>`;
-    };
-
     // Overview Charts & Recent Orders
     const chartCategoriesEl = document.getElementById('admin-chart-categories');
     if (chartCategoriesEl) {
       const totalItems = Math.max(1, state.catalog.length);
-      chartCategoriesEl.innerHTML = [
+      const bars = [
         { id: 'living', label: 'Living Room' },
         { id: 'dining', label: 'Dining Room' },
         { id: 'bedroom', label: 'Bedroom' },
         { id: 'office', label: 'Study/Work Desks' },
         { id: 'kitchen', label: 'Kitchen' },
-      ]
-        .map((cat) => {
-          const matches = state.catalog.filter((p) => p.categoryId === cat.id);
-          const pct = Math.round((matches.length / totalItems) * 100);
-          return `<div><div class="flex items-center justify-between text-xs"><span class="font-semibold text-slate-800">${esc(
-            cat.label
-          )}</span><span class="font-mono-tech text-slate-500">${
-            matches.length
-          } items</span></div><div class="admin-progress-track"><div class="admin-progress-fill-blue" style="width: ${
-            matches.length > 0 ? Math.max(8, pct) : 0
-          }%"></div></div></div>`;
-        })
-        .join('');
+      ].map((cat) => {
+        const node = cloneTpl('tpl-admin-category-bar');
+        if (!node) return document.createElement('div');
+        const matches = state.catalog.filter((p) => p.categoryId === cat.id);
+        const pct = Math.round((matches.length / totalItems) * 100);
+        setRole(node, 'bar-label', cat.label);
+        setRole(node, 'bar-count', `${matches.length} items`);
+        const fill = node.querySelector('[data-role="bar-fill"]');
+        if (fill) fill.style.width = `${matches.length > 0 ? Math.max(8, pct) : 0}%`;
+        return node;
+      });
+      chartCategoriesEl.replaceChildren(...bars);
     }
 
-    const recentOrdersEl = document.getElementById('admin-overview-recent-orders');
-    if (recentOrdersEl) {
-      const recentList = state.orders.slice(0, 4);
-      recentOrdersEl.innerHTML = `<div class="p-5 sm:p-6 border-b border-slate-200 flex items-center justify-between gap-3"><div><h2 class="text-base font-bold text-slate-900">Recent Customer Orders</h2></div><div class="flex items-center gap-2"><button type="button" data-admin-jump="inventory" class="admin-btn admin-btn-sm admin-btn-secondary">Manage Inventory</button><button type="button" data-admin-jump="orders" class="admin-btn admin-btn-sm admin-btn-primary">View All Orders</button></div></div><div class="overflow-x-auto"><table class="admin-table"><thead><tr><th>Order #</th><th>Customer</th><th>Product</th><th>Stage</th><th class="text-right">Total</th></tr></thead><tbody>${recentList
-        .map(
-          (o) =>
-            `<tr><td class="font-mono-tech text-xs font-bold text-[#0095FF]">#${esc(
-              o.orderNumber
-            )}</td><td><p class="admin-table-title">${esc(o.clientName)}</p></td><td><p class="admin-table-title">${esc(
-              o.furnitureName
-            )}</p></td><td><span class="admin-status-badge admin-status-in-stock">${esc(
-              o.status.split('·')[0].trim()
-            )}</span></td><td class="text-right font-mono-tech font-bold">${usd(o.totalAmount)}</td></tr>`
-        )
-        .join('')}</tbody></table></div>`;
-      recentOrdersEl.querySelectorAll('[data-admin-jump]').forEach((btn) =>
-        btn.addEventListener('click', () => window.__switchAdminTab?.(btn.getAttribute('data-admin-jump')))
-      );
+    const recentTbody = document.getElementById('admin-recent-orders-tbody');
+    if (recentTbody) {
+      const rows = state.orders.slice(0, 4).map((o) => {
+        const tr = cloneTpl('tpl-admin-recent-order-row');
+        if (!tr) return document.createElement('tr');
+        setRole(tr, 'ord-num', `#${o.orderNumber}`);
+        setRole(tr, 'ord-client', o.clientName);
+        setRole(tr, 'ord-prod', o.furnitureName);
+        setRole(tr, 'ord-stage', o.status.split('·')[0].trim());
+        setRole(tr, 'ord-total', usd(o.totalAmount));
+        return tr;
+      });
+      recentTbody.replaceChildren(...rows);
     }
 
     // Admin Catalog Section
-    const adminCatalogEl = document.getElementById('admin-catalog-list');
-    if (adminCatalogEl) {
+    const adminCatalogTbody = document.getElementById('admin-catalog-tbody');
+    if (adminCatalogTbody) {
       const query = (state.adminProductSearch || '').trim().toLowerCase();
       const catFilter = state.adminProductCategory || 'all';
       const stockFilter = state.adminProductStockFilter || 'all';
       const typeFilter = state.adminProductTypeFilter || 'all';
       const prodMetrics = computeInventoryMetrics(state.catalog);
+      setTxt('prod-kpi-total', String(prodMetrics.totalProducts));
+      setTxt('prod-kpi-in-stock', String(prodMetrics.inStockCount));
+      setTxt('prod-kpi-low-stock', String(prodMetrics.lowStockCount));
+      setTxt('prod-kpi-out-stock', String(prodMetrics.outOfStockCount));
+
       const filteredProducts = state.catalog.filter((p) => {
         const pType = p.productType === 'customized' || p.isCustomClientDesign ? 'customized' : 'standard';
         const stockInfo = getProductStockStatus(p);
@@ -1507,65 +1543,53 @@ export function createDashboard({
       const prodPagination = paginateItems(filteredProducts, state.adminProductPage || 1, 6);
       state.adminProductPage = prodPagination.currentPage;
 
-      adminCatalogEl.innerHTML = `<div class="admin-summary-grid-4"><div class="admin-summary-card"><span class="admin-summary-label">Total Products</span><span id="prod-kpi-total" class="admin-summary-value">${
-        prodMetrics.totalProducts
-      }</span></div><div class="admin-summary-card"><span class="admin-summary-label">In Stock</span><span class="admin-summary-value is-green">${
-        prodMetrics.inStockCount
-      }</span></div><div class="admin-summary-card"><span class="admin-summary-label">Low Stock</span><span class="admin-summary-value is-orange">${
-        prodMetrics.lowStockCount
-      }</span></div><div class="admin-summary-card"><span class="admin-summary-label">Out of Stock</span><span class="admin-summary-value is-red">${
-        prodMetrics.outOfStockCount
-      }</span></div></div><div class="admin-card"><div class="admin-toolbar"><div class="admin-toolbar-filters"><input id="admin-catalog-search" type="search" value="${esc(
-        state.adminProductSearch
-      )}" placeholder="Search product name, SKU..." class="admin-input admin-search-input" /></div><button type="button" id="admin-toggle-add-product-btn" class="admin-btn admin-btn-sm admin-btn-primary">+ Add Product</button></div><div class="overflow-x-auto"><table class="admin-table"><thead><tr><th class="admin-col-primary">Product Name</th><th>Category</th><th>Available Stock</th><th>Minimum Stock</th><th>Unit Price</th><th>Stock Status</th><th class="text-right">Actions</th></tr></thead><tbody>${prodPagination.items
-        .map((p) => {
-          const imgUrl = (p.image || 'assets/images/category_dining_tables.jpg').replace(/^\//, '');
-          const stockInfo = getProductStockStatus(p);
-          return `<tr data-product-row="${esc(p.id)}"><td class="admin-col-primary"><div class="flex items-center gap-3"><img src="${esc(
-            imgUrl
-          )}" alt="${esc(p.name)}" class="admin-thumb" /><div><p class="admin-table-title">${esc(
-            p.name
-          )}</p><p class="admin-table-sub font-mono-tech">ProductID: ${esc(
-            p.productId || p.sku
-          )}</p></div></div></td><td><span class="admin-category-tag">${esc(
-            p.categoryName
-          )}</span></td><td class="font-mono-tech font-semibold">${
-            stockInfo.availableStock
-          } pcs</td><td class="font-mono-tech">${stockInfo.minStockLevel} pcs</td><td class="font-mono-tech font-semibold">${usd(
-            p.effectivePrice
-          )}</td><td>${renderStockStatusBadge(
-            stockInfo.statusKey
-          )}</td><td class="text-right whitespace-nowrap"><button type="button" class="admin-btn admin-btn-sm admin-btn-secondary" data-edit-product="${esc(
-            p.id
-          )}">Edit</button> <button type="button" class="admin-btn admin-btn-sm admin-btn-danger" data-delete-product="${esc(
-            p.id
-          )}">Remove</button></td></tr>`;
-        })
-        .join('')}</tbody></table></div></div>`;
-
-      bindLiveSearchInput('admin-catalog-search', 'adminProductSearch', () => {
-        state.adminProductPage = 1;
-        renderDashboardContent();
+      const rows = prodPagination.items.map((p) => {
+        const tr = cloneTpl('tpl-admin-product-row');
+        if (!tr) return document.createElement('tr');
+        tr.setAttribute('data-product-row', p.id);
+        const stockInfo = getProductStockStatus(p);
+        const img = tr.querySelector('[data-role="prod-img"]');
+        if (img) {
+          img.src = (p.image || 'assets/images/category_dining_tables.jpg').replace(/^\//, '');
+          img.alt = p.name;
+        }
+        setRole(tr, 'prod-name', p.name);
+        setRole(tr, 'prod-sku', `ProductID: ${p.productId || p.sku}`);
+        setRole(tr, 'prod-cat', p.categoryName);
+        setRole(tr, 'prod-stock', `${stockInfo.availableStock} pcs`);
+        setRole(tr, 'prod-min', `${stockInfo.minStockLevel} pcs`);
+        setRole(tr, 'prod-price', usd(p.effectivePrice));
+        applyStatusBadge(
+          tr.querySelector('[data-role="prod-badge"]'),
+          tr.querySelector('[data-role="prod-badge-text"]'),
+          stockInfo.statusKey
+        );
+        tr.querySelector('[data-role="prod-edit"]')?.addEventListener('click', () => window.__openProductFormForEdit?.(p));
+        tr.querySelector('[data-role="prod-remove"]')?.addEventListener('click', () => window.__removeProductById?.(p.id));
+        return tr;
       });
-      document
-        .getElementById('admin-toggle-add-product-btn')
-        ?.addEventListener('click', () => window.__switchAdminTab?.('add-product'));
-      adminCatalogEl.querySelectorAll('[data-edit-product]').forEach((btn) =>
-        btn.addEventListener('click', () => {
-          const prod = state.catalog.find((i) => i.id === btn.getAttribute('data-edit-product'));
-          if (prod) window.__openProductFormForEdit?.(prod);
-        })
-      );
-      adminCatalogEl.querySelectorAll('[data-delete-product]').forEach((btn) =>
-        btn.addEventListener('click', () => window.__removeProductById?.(btn.getAttribute('data-delete-product')))
-      );
+      adminCatalogTbody.replaceChildren(...rows);
     }
 
     // Admin Inventory & Stock Management
-    const adminInventoryEl = document.getElementById('admin-tab-inventory');
-    if (adminInventoryEl) {
+    const adminInvTbody = document.getElementById('admin-inventory-tbody');
+    if (adminInvTbody) {
       const metrics = computeMaterialInventoryMetrics(state.materials);
-      const categories = getMaterialCategories(state.materials);
+      setTxt('inv-kpi-total-materials', String(metrics.totalMaterials));
+      setTxt('inv-kpi-in-stock', String(metrics.inStockCount));
+      setTxt('inv-kpi-low-stock', String(metrics.lowStockCount));
+      setTxt('inv-kpi-out-stock', String(metrics.outOfStockCount));
+      setTxt('inv-kpi-total-value', usd(metrics.totalInventoryValue));
+
+      const catSelect = document.getElementById('admin-inv-category-filter');
+      if (catSelect) {
+        const categories = getMaterialCategories(state.materials);
+        catSelect.replaceChildren(
+          createOption('all', 'All Categories', state.adminInventoryCategoryFilter === 'all'),
+          ...categories.map((cat) => createOption(cat, cat, state.adminInventoryCategoryFilter === cat))
+        );
+      }
+
       const filteredMaterials = filterInventoryMaterials(state.materials, {
         searchQuery: state.adminInventoryStockSearch || '',
         categoryFilter: state.adminInventoryCategoryFilter || 'all',
@@ -1574,60 +1598,25 @@ export function createDashboard({
       const pagination = paginateItems(filteredMaterials, state.adminInventoryPage || 1, 5);
       state.adminInventoryPage = pagination.currentPage;
 
-      adminInventoryEl.innerHTML = `<div class="space-y-5"><div class="admin-summary-grid-5" data-testid="inventory-summary-cards"><div class="admin-summary-card"><span class="admin-summary-label">Total Materials</span><span id="inv-kpi-total-materials" class="admin-summary-value">${
-        metrics.totalMaterials
-      }</span></div><div class="admin-summary-card"><span class="admin-summary-label">In Stock</span><span id="inv-kpi-in-stock" class="admin-summary-value is-green">${
-        metrics.inStockCount
-      }</span></div><div class="admin-summary-card"><span class="admin-summary-label">Low Stock</span><span id="inv-kpi-low-stock" class="admin-summary-value is-orange">${
-        metrics.lowStockCount
-      }</span></div><div class="admin-summary-card"><span class="admin-summary-label">Out of Stock</span><span id="inv-kpi-out-stock" class="admin-summary-value is-red">${
-        metrics.outOfStockCount
-      }</span></div><div class="admin-summary-card"><span class="admin-summary-label">Total Inventory Value</span><span id="inv-kpi-total-value" class="admin-summary-value is-blue font-mono-tech">${usd(
-        metrics.totalInventoryValue
-      )}</span></div></div><div class="admin-card"><div class="admin-toolbar"><div class="admin-toolbar-filters"><input id="admin-inv-stock-search" type="search" value="${esc(
-        state.adminInventoryStockSearch
-      )}" placeholder="Search material name, SKU..." class="admin-input admin-search-input" /><select id="admin-inv-category-filter" class="admin-select admin-filter-select"><option value="all">All Categories</option>${categories
-        .map(
-          (cat) =>
-            `<option value="${esc(cat)}" ${
-              state.adminInventoryCategoryFilter === cat ? 'selected' : ''
-            }>${esc(cat)}</option>`
-        )
-        .join('')}</select></div></div><div class="overflow-x-auto"><table class="admin-table" data-testid="inventory-materials-table"><thead><tr><th class="admin-col-primary">Material Name</th><th>Category</th><th>Available Stock</th><th>Minimum Stock</th><th>Unit Cost</th><th>Stock Status</th><th class="text-right">Actions</th></tr></thead><tbody>${pagination.items
-        .map((m) => {
-          const st = getMaterialStockStatus(m);
-          return `<tr data-material-row="${esc(m.id)}"><td class="admin-col-primary"><p class="admin-table-title">${esc(
-            m.name
-          )}</p><p class="admin-table-sub font-mono-tech">MaterialID: ${esc(
-            m.materialId || m.sku || m.code
-          )}</p></td><td><span class="admin-category-tag">${esc(
-            m.materialType
-          )}</span></td><td class="font-mono-tech font-semibold">${st.availableStock} ${esc(
-            m.unit
-          )}</td><td class="font-mono-tech">${st.minStockLevel} ${esc(
-            m.unit
-          )}</td><td class="font-mono-tech">${usd(m.unitCost)}</td><td>${renderStockStatusBadge(
-            st.statusKey
-          )}</td><td class="text-right whitespace-nowrap"><button type="button" class="admin-btn admin-btn-sm admin-btn-secondary" data-quick-restock="${esc(
-            m.id
-          )}">+10 Stock</button></td></tr>`;
-        })
-        .join('')}</tbody></table></div></div></div>`;
-
-      bindLiveSearchInput('admin-inv-stock-search', 'adminInventoryStockSearch', () => {
-        state.adminInventoryPage = 1;
-        renderDashboardContent();
-      });
-      document.getElementById('admin-inv-category-filter')?.addEventListener('change', (e) => {
-        state.adminInventoryCategoryFilter = e.target.value;
-        state.adminInventoryPage = 1;
-        renderDashboardContent();
-      });
-      adminInventoryEl.querySelectorAll('[data-quick-restock]').forEach((btn) =>
-        btn.addEventListener('click', async () => {
-          const materialId = btn.getAttribute('data-quick-restock') || '';
+      const rows = pagination.items.map((m) => {
+        const tr = cloneTpl('tpl-admin-material-row');
+        if (!tr) return document.createElement('tr');
+        tr.setAttribute('data-material-row', m.id);
+        const st = getMaterialStockStatus(m);
+        setRole(tr, 'mat-name', m.name);
+        setRole(tr, 'mat-code', `MaterialID: ${m.materialId || m.sku || m.code}`);
+        setRole(tr, 'mat-type', m.materialType);
+        setRole(tr, 'mat-stock', `${st.availableStock} ${m.unit}`);
+        setRole(tr, 'mat-min', `${st.minStockLevel} ${m.unit}`);
+        setRole(tr, 'mat-cost', usd(m.unitCost));
+        applyStatusBadge(
+          tr.querySelector('[data-role="mat-badge"]'),
+          tr.querySelector('[data-role="mat-badge-text"]'),
+          st.statusKey
+        );
+        tr.querySelector('[data-role="mat-restock"]')?.addEventListener('click', async () => {
           const movementInput = {
-            materialId,
+            materialId: m.id,
             transactionType: 'Stock In',
             quantity: 10,
             reason: 'Workshop Raw Material Restock',
@@ -1655,63 +1644,60 @@ export function createDashboard({
           }
           showAdminBanner('Added +10 stock units to material inventory.');
           renderDashboardContent();
-        })
-      );
+        });
+        return tr;
+      });
+      adminInvTbody.replaceChildren(...rows);
     }
 
     // Admin Vouchers Section
     const vchSelect = document.getElementById('vch-product');
     if (vchSelect) {
       const prev = vchSelect.value;
-      vchSelect.innerHTML = state.catalog
-        .map((p) => `<option value="${esc(p.id)}">${esc(p.name)} (${esc(p.sku)} · ${usd(p.effectivePrice)})</option>`)
-        .join('');
-      if (prev && state.catalog.some((p) => p.id === prev)) vchSelect.value = prev;
-    }
-    const adminVouchersEl = document.getElementById('admin-vouchers-list');
-    if (adminVouchersEl) {
-      const nowMs = Date.now();
-      adminVouchersEl.innerHTML = `<div class="admin-card overflow-hidden"><div class="p-5 border-b border-slate-200"><h2 class="text-base font-bold text-slate-900">Issued Vouchers (${
-        state.vouchers.length
-      })</h2></div><div class="overflow-x-auto"><table class="admin-table vch-table"><thead><tr><th>Voucher Code</th><th>Customer</th><th>Eligible Product</th><th>Discount</th><th>Status</th><th class="text-right">Actions</th></tr></thead><tbody>${state.vouchers
-        .map((v) => {
-          const statusInfo = computeVoucherStatusInfo(v, nowMs);
-          return `<tr><td><span class="vch-code-chip">${esc(v.code)}</span></td><td><p class="admin-table-title">${esc(
-            v.customerName || 'Client'
-          )}</p><p class="admin-table-sub font-mono-tech">${esc(v.customerEmail)}</p></td><td>${esc(
-            v.furnitureName || v.productName
-          )}</td><td class="font-mono-tech font-bold text-[#0095FF]">-${usd(
-            v.discountAmount ?? v.discountValue ?? 0
-          )}</td><td><span class="admin-status-badge ${statusInfo.badgeClass}">${esc(
-            statusInfo.status
-          )}</span></td><td class="text-right">${
-            statusInfo.status !== 'Revoked' && statusInfo.status !== 'Used'
-              ? `<button type="button" data-revoke-voucher="${esc(
-                  v.id
-                )}" class="admin-btn admin-btn-sm admin-btn-danger">Revoke</button>`
-              : ''
-          }</td></tr>`;
-        })
-        .join('')}</tbody></table></div></div>`;
-
-      adminVouchersEl.querySelectorAll('[data-revoke-voucher]').forEach((btn) =>
-        btn.addEventListener('click', async () => {
-          const vid = btn.getAttribute('data-revoke-voucher') || '';
-          const serverRes = await syncDatabaseStore('revoke_voucher', { voucherId: vid });
-          if (serverRes?.ok && Array.isArray(serverRes.vouchers)) state.vouchers = serverRes.vouchers;
-          else {
-            const fb = revokeVoucherInList(state.vouchers, vid, Date.now());
-            if (fb.ok) state.vouchers = fb.vouchers;
-          }
-          showAdminBanner('Voucher has been revoked.');
-          renderDashboardContent();
-        })
+      vchSelect.replaceChildren(
+        ...state.catalog.map((p) =>
+          createOption(p.id, `${p.name} (${p.sku} · ${usd(p.effectivePrice)})`, p.id === prev)
+        )
       );
+    }
+    const adminVouchersTbody = document.getElementById('admin-vouchers-tbody');
+    if (adminVouchersTbody) {
+      setTxt('admin-vouchers-count-heading', `Issued Vouchers (${state.vouchers.length})`);
+      const nowMs = Date.now();
+      const rows = state.vouchers.map((v) => {
+        const tr = cloneTpl('tpl-admin-voucher-row');
+        if (!tr) return document.createElement('tr');
+        const statusInfo = computeVoucherStatusInfo(v, nowMs);
+        setRole(tr, 'vch-code', v.code);
+        setRole(tr, 'vch-cust-name', v.customerName || 'Client');
+        setRole(tr, 'vch-cust-email', v.customerEmail);
+        setRole(tr, 'vch-prod', v.furnitureName || v.productName);
+        setRole(tr, 'vch-disc', `-${usd(v.discountAmount ?? v.discountValue ?? 0)}`);
+        const stEl = setRole(tr, 'vch-status', statusInfo.status);
+        if (stEl) stEl.className = `admin-status-badge ${statusInfo.badgeClass}`;
+        const revokeBtn = tr.querySelector('[data-role="vch-revoke"]');
+        if (revokeBtn && statusInfo.status !== 'Revoked' && statusInfo.status !== 'Used') {
+          revokeBtn.classList.remove('hidden');
+          revokeBtn.addEventListener('click', async () => {
+            const serverRes = await syncDatabaseStore('revoke_voucher', { voucherId: v.id });
+            if (serverRes?.ok && Array.isArray(serverRes.vouchers)) state.vouchers = serverRes.vouchers;
+            else {
+              const fb = revokeVoucherInList(state.vouchers, v.id, Date.now());
+              if (fb.ok) state.vouchers = fb.vouchers;
+            }
+            showAdminBanner('Voucher has been revoked.');
+            renderDashboardContent();
+          });
+        }
+        return tr;
+      });
+      adminVouchersTbody.replaceChildren(...rows);
     }
 
     // Admin Orders Section
-    const adminOrdersEl = document.getElementById('admin-tab-orders');
-    if (adminOrdersEl) {
+    const activeOrdersTbody = document.getElementById('admin-active-orders-tbody');
+    const completedOrdersTbody = document.getElementById('admin-completed-orders-tbody');
+    if (activeOrdersTbody && completedOrdersTbody) {
       const statusOptions = [
         'Order Confirmed · In Production Queue',
         'Timber Selection & Kiln Verification',
@@ -1735,169 +1721,155 @@ export function createDashboard({
       const filteredActiveOrders = activeOrders.filter((o) => matchesOrderQuery(o) && stageFilter !== 'completed');
       const filteredCompletedOrders = completedOrders.filter((o) => matchesOrderQuery(o));
 
-      adminOrdersEl.innerHTML = `<div class="space-y-6"><div class="admin-summary-grid-4"><div class="admin-summary-card"><span class="admin-summary-label">Total Orders</span><span class="admin-summary-value">${
-        state.orders.length
-      }</span></div><div class="admin-summary-card"><span class="admin-summary-label">Active Orders</span><span id="admin-orders-active-count" class="admin-summary-value is-blue">${
-        activeOrders.length
-      }</span></div><div class="admin-summary-card"><span class="admin-summary-label">In Production</span><span class="admin-summary-value is-orange">${inProdCount}</span></div><div class="admin-summary-card"><span class="admin-summary-label">Completed Orders</span><span id="admin-orders-completed-count" class="admin-summary-value is-green">${
-        completedOrders.length
-      }</span></div></div><div id="admin-active-orders-section" data-testid="admin-active-orders-section" class="admin-card overflow-hidden"><div class="px-6 py-4 border-b border-slate-200 bg-slate-50/70 flex items-center justify-between"><h3 class="text-sm font-bold text-slate-900">Active Orders (${
-        filteredActiveOrders.length
-      })</h3></div><div class="admin-toolbar"><div class="admin-toolbar-filters"><input id="admin-orders-search" type="search" value="${esc(
-        state.adminOrderSearch
-      )}" placeholder="Search order #, customer..." class="admin-input admin-search-input" /></div></div><div class="overflow-x-auto"><table class="admin-table" data-testid="admin-active-orders-table"><thead><tr><th>Order #</th><th>Customer</th><th>Product &amp; Finish</th><th>Order Stage</th><th class="text-right">Total Amount</th></tr></thead><tbody>${filteredActiveOrders
-        .map((o) => {
-          const realIdx = state.orders.findIndex((item) => item.orderNumber === o.orderNumber);
-          return `<tr data-testid="admin-active-order-row-${esc(
-            o.orderNumber
-          )}"><td class="whitespace-nowrap"><p class="font-mono-tech text-xs font-bold text-[#0095FF]">#${esc(
-            o.orderNumber
-          )}</p></td><td><p class="admin-table-title">${esc(o.clientName)}</p><p class="admin-table-sub">${esc(
-            o.clientEmail
-          )}</p></td><td><p class="admin-table-title">${esc(o.furnitureName)}</p><p class="admin-table-sub">${esc(
-            o.selectedFinish
-          )}</p></td><td><select aria-label="Update status for order ${esc(
-            o.orderNumber
-          )}" data-admin-order-idx="${realIdx}" class="admin-select admin-order-status-select">${statusOptions
-            .map((st) => `<option value="${esc(st)}" ${o.status === st ? 'selected' : ''}>${esc(st)}</option>`)
-            .join('')}</select>${
-            o.cancellationRequested
-              ? `<div class="mt-2 flex items-center gap-2"><button type="button" data-admin-approve-cancel="${esc(
-                  o.orderNumber
-                )}" class="px-2.5 py-1 rounded-lg bg-rose-600 text-white text-[11px] font-semibold cursor-pointer">Approve Cancel</button><button type="button" data-admin-decline-cancel="${esc(
-                  o.orderNumber
-                )}" class="px-2.5 py-1 rounded-lg bg-white border border-slate-300 text-[11px] font-semibold cursor-pointer">Decline</button></div>`
-              : ''
-          }</td><td class="text-right font-mono-tech text-sm font-bold">${usd(o.totalAmount)}</td></tr>`;
-        })
-        .join(
-          ''
-        )}</tbody></table></div></div><div id="admin-completed-orders-section" data-testid="admin-completed-orders-section" class="admin-card overflow-hidden"><div class="px-6 py-4 border-b border-slate-200 bg-emerald-50/60 flex items-center justify-between"><h3 class="text-sm font-bold text-slate-900">Completed Orders (${
-        filteredCompletedOrders.length
-      })</h3><span id="admin-completed-section-badge" class="px-2.5 py-1 rounded-full bg-emerald-600 text-white font-mono-tech text-xs font-bold">${
-        completedOrders.length
-      } Completed</span></div><div class="overflow-x-auto"><table class="admin-table" data-testid="admin-completed-orders-table"><thead><tr><th>Order #</th><th>Transaction Ref</th><th>Customer</th><th>Product &amp; Finish</th><th>Completed Date</th><th>Status</th><th class="text-right">Total Amount</th></tr></thead><tbody id="admin-completed-orders-tbody">${filteredCompletedOrders
-        .map((o) => {
-          const ordDigits = String(o.orderNumber || '').split('-').pop() || '0000';
-          return `<tr data-testid="admin-completed-order-row-${esc(
-            o.orderNumber
-          )}"><td class="font-mono-tech text-xs font-bold text-[#0095FF]">#${esc(
-            o.orderNumber
-          )}</td><td class="font-mono-tech text-xs font-bold">${esc(
-            o.transactionReference || `TXN-2026-${ordDigits}`
-          )}</td><td><p class="admin-table-title">${esc(o.clientName)}</p></td><td><p class="admin-table-title">${esc(
-            o.furnitureName
-          )}</p></td><td class="font-mono-tech text-xs">${esc(
-            o.completedAt || o.orderDate
-          )}</td><td><span class="admin-status-badge admin-status-in-stock">Completed</span></td><td class="text-right font-mono-tech text-sm font-bold text-emerald-700">${usd(
-            o.totalAmount
-          )}</td></tr>`;
-        })
-        .join('')}</tbody></table></div></div></div>`;
+      setTxt('admin-orders-total-count', String(state.orders.length));
+      setTxt('admin-orders-active-count', String(activeOrders.length));
+      setTxt('admin-orders-inprod-count', String(inProdCount));
+      setTxt('admin-orders-completed-count', String(completedOrders.length));
+      setTxt('admin-active-orders-heading', `Active Orders (${filteredActiveOrders.length})`);
+      setTxt('admin-completed-orders-heading', `Completed Orders (${filteredCompletedOrders.length})`);
+      setTxt('admin-completed-section-badge', `${completedOrders.length} Completed`);
 
-      bindLiveSearchInput('admin-orders-search', 'adminOrderSearch', renderDashboardContent);
-      adminOrdersEl.querySelectorAll('[data-admin-order-idx]').forEach((sel) =>
-        sel.addEventListener('change', async (e) => {
-          const ord = state.orders[Number(sel.getAttribute('data-admin-order-idx'))];
-          if (!ord) return;
-          const nextStatus = e.target.value;
-          const performUpdate = async () => {
-            const serverRes = await syncDatabaseStore('update_order_status', {
-              orderNumber: ord.orderNumber,
-              status: nextStatus,
-            });
-            if (serverRes?.ok && Array.isArray(serverRes.orders)) {
-              state.orders = serverRes.orders;
-            } else {
-              const res = applyAdminOrderUpdate({
-                orders: state.orders,
-                orderNumber: ord.orderNumber,
-                updates: { status: nextStatus },
+      const activeRows = filteredActiveOrders.map((o) => {
+        const tr = cloneTpl('tpl-admin-active-order-row');
+        if (!tr) return document.createElement('tr');
+        tr.setAttribute('data-testid', `admin-active-order-row-${o.orderNumber}`);
+        setRole(tr, 'ord-num', `#${o.orderNumber}`);
+        setRole(tr, 'ord-client', o.clientName);
+        setRole(tr, 'ord-email', o.clientEmail);
+        setRole(tr, 'ord-prod', o.furnitureName);
+        setRole(tr, 'ord-finish', o.selectedFinish);
+        setRole(tr, 'ord-total', usd(o.totalAmount));
+
+        const sel = tr.querySelector('[data-role="ord-select"]');
+        if (sel) {
+          sel.setAttribute('aria-label', `Update status for order ${o.orderNumber}`);
+          sel.replaceChildren(...statusOptions.map((st) => createOption(st, st, o.status === st)));
+          sel.addEventListener('change', async (e) => {
+            const nextStatus = e.target.value;
+            const performUpdate = async () => {
+              const serverRes = await syncDatabaseStore('update_order_status', {
+                orderNumber: o.orderNumber,
+                status: nextStatus,
               });
+              if (serverRes?.ok && Array.isArray(serverRes.orders)) {
+                state.orders = serverRes.orders;
+              } else {
+                const res = applyAdminOrderUpdate({
+                  orders: state.orders,
+                  orderNumber: o.orderNumber,
+                  updates: { status: nextStatus },
+                });
+                if (res.ok) {
+                  state.orders = res.updatedOrders;
+                  saveOrdersToStorage();
+                }
+              }
+              showAdminBanner(`Updated Order #${o.orderNumber} stage to "${nextStatus}".`);
+              renderDashboardContent();
+            };
+            if (/Completed|Delivered/i.test(nextStatus)) {
+              openAdminConfirmModal({
+                title: `Complete Order #${o.orderNumber}?`,
+                message: `Mark Order #${o.orderNumber} (${o.furnitureName}) as Completed?`,
+                confirmLabel: 'Yes, Complete Order',
+                confirmVariant: 'primary',
+                onConfirm: performUpdate,
+                onCancel: () => {
+                  sel.value = o.status;
+                  renderDashboardContent();
+                },
+              });
+            } else {
+              await performUpdate();
+            }
+          });
+        }
+
+        if (o.cancellationRequested) {
+          const cancelWrap = tr.querySelector('[data-role="ord-cancel-actions"]');
+          cancelWrap?.classList.remove('hidden');
+          const handleDecision = async (decision) => {
+            const serverRes = await syncDatabaseStore('resolve_order_cancellation', {
+              orderNumber: o.orderNumber,
+              decision,
+            });
+            if (serverRes?.ok && Array.isArray(serverRes.orders)) state.orders = serverRes.orders;
+            else {
+              const res = resolveOrderCancellationRequest({ orders: state.orders, orderNumber: o.orderNumber, decision });
               if (res.ok) {
                 state.orders = res.updatedOrders;
                 saveOrdersToStorage();
               }
             }
-            showAdminBanner(`Updated Order #${ord.orderNumber} stage to "${nextStatus}".`);
+            showAdminBanner(
+              `${decision === 'approve' ? 'Approved' : 'Declined'} cancellation request for Order #${o.orderNumber}.`
+            );
             renderDashboardContent();
           };
-          if (/Completed|Delivered/i.test(nextStatus)) {
-            openAdminConfirmModal({
-              title: `Complete Order #${ord.orderNumber}?`,
-              message: `Mark Order #${ord.orderNumber} (${ord.furnitureName}) as Completed?`,
-              confirmLabel: 'Yes, Complete Order',
-              confirmVariant: 'primary',
-              onConfirm: performUpdate,
-              onCancel: () => {
-                sel.value = ord.status;
-                renderDashboardContent();
-              },
-            });
-          } else {
-            await performUpdate();
-          }
-        })
-      );
+          tr.querySelector('[data-role="ord-approve-cancel"]')?.addEventListener('click', () => handleDecision('approve'));
+          tr.querySelector('[data-role="ord-decline-cancel"]')?.addEventListener('click', () => handleDecision('decline'));
+        }
+        return tr;
+      });
+      activeOrdersTbody.replaceChildren(...activeRows);
 
-      adminOrdersEl.querySelectorAll('[data-admin-approve-cancel], [data-admin-decline-cancel]').forEach((btn) =>
-        btn.addEventListener('click', async () => {
-          const isApprove = btn.hasAttribute('data-admin-approve-cancel');
-          const orderNumber =
-            btn.getAttribute(isApprove ? 'data-admin-approve-cancel' : 'data-admin-decline-cancel') || '';
-          const decision = isApprove ? 'approve' : 'decline';
-          const serverRes = await syncDatabaseStore('resolve_order_cancellation', { orderNumber, decision });
-          if (serverRes?.ok && Array.isArray(serverRes.orders)) state.orders = serverRes.orders;
-          else {
-            const res = resolveOrderCancellationRequest({ orders: state.orders, orderNumber, decision });
-            if (res.ok) {
-              state.orders = res.updatedOrders;
-              saveOrdersToStorage();
-            }
-          }
-          showAdminBanner(
-            `${isApprove ? 'Approved' : 'Declined'} cancellation request for Order #${orderNumber}.`
-          );
-          renderDashboardContent();
-        })
-      );
+      const completedRows = filteredCompletedOrders.map((o) => {
+        const tr = cloneTpl('tpl-admin-completed-order-row');
+        if (!tr) return document.createElement('tr');
+        tr.setAttribute('data-testid', `admin-completed-order-row-${o.orderNumber}`);
+        const ordDigits = String(o.orderNumber || '').split('-').pop() || '0000';
+        setRole(tr, 'ord-num', `#${o.orderNumber}`);
+        setRole(tr, 'ord-tx', o.transactionReference || `TXN-2026-${ordDigits}`);
+        setRole(tr, 'ord-client', o.clientName);
+        setRole(tr, 'ord-prod', o.furnitureName);
+        setRole(tr, 'ord-date', o.completedAt || o.orderDate);
+        setRole(tr, 'ord-total', usd(o.totalAmount));
+        return tr;
+      });
+      completedOrdersTbody.replaceChildren(...completedRows);
     }
 
     // Admin Customer Directory
-    const adminCustomersEl = document.getElementById('admin-tab-customers');
-    if (adminCustomersEl) {
+    const adminCustomersTbody = document.getElementById('admin-customers-tbody');
+    if (adminCustomersTbody) {
       const custQuery = (state.adminCustomerSearch || '').trim().toLowerCase();
       const filteredCustomers = customerDirectory.filter(
         (c) => !custQuery || c.name.toLowerCase().includes(custQuery) || c.email.toLowerCase().includes(custQuery)
       );
-      adminCustomersEl.innerHTML = `<div class="admin-card overflow-hidden"><div class="admin-toolbar"><div class="admin-toolbar-filters"><input id="admin-customers-search" type="search" value="${esc(
-        state.adminCustomerSearch
-      )}" placeholder="Search customer name, email..." class="admin-input admin-search-input" /></div></div><div class="overflow-x-auto"><table class="admin-table"><thead><tr><th class="admin-col-primary">Customer Name</th><th>Email Address</th><th>Phone</th><th>Delivery Address</th><th>Orders</th><th>Total Spent</th></tr></thead><tbody>${filteredCustomers
-        .map(
-          (c) =>
-            `<tr><td class="admin-col-primary"><p class="admin-table-title">${esc(
-              c.name
-            )}</p><p class="admin-table-sub font-mono-tech">CustomerID: ${esc(
-              c.customerId || c.id
-            )}</p></td><td class="text-xs">${esc(c.email)}</td><td class="font-mono-tech text-xs">${esc(
-              c.phone
-            )}</td><td class="text-xs">${esc(c.address)}</td><td class="font-mono-tech font-semibold">${
-              c.orderCount
-            } orders</td><td class="font-mono-tech font-semibold text-[#0095FF]">${usd(c.totalSpent)}</td></tr>`
-        )
-        .join('')}</tbody></table></div></div>`;
-      bindLiveSearchInput('admin-customers-search', 'adminCustomerSearch', renderDashboardContent);
+      const rows = filteredCustomers.map((c) => {
+        const tr = cloneTpl('tpl-admin-customer-row');
+        if (!tr) return document.createElement('tr');
+        setRole(tr, 'cust-name', c.name);
+        setRole(tr, 'cust-id', `CustomerID: ${c.customerId || c.id}`);
+        setRole(tr, 'cust-email', c.email);
+        setRole(tr, 'cust-phone', c.phone);
+        setRole(tr, 'cust-address', c.address);
+        setRole(tr, 'cust-orders', `${c.orderCount} orders`);
+        setRole(tr, 'cust-spent', usd(c.totalSpent));
+        return tr;
+      });
+      adminCustomersTbody.replaceChildren(...rows);
     }
 
     if (state.activeAdminTab === 'analytics') renderAdminAnalyticsSection();
   }
 
-  function renderDeltaBadge(metric) {
-    if (!metric) return '';
-    const dir = metric.direction || 'flat';
-    const arrow = dir === 'up' ? '↑' : dir === 'down' ? '↓' : '→';
-    const tone = dir === 'up' ? 'is-up' : dir === 'down' ? 'is-down' : 'is-flat';
-    return `<span class="analytics-delta-tag ${tone}">${arrow} ${esc(metric.formattedChange || '0.0%')}</span>`;
+  function applyOverviewMetricBadge(badgeId, metric) {
+    const el = document.getElementById(badgeId);
+    if (!el || !metric) return;
+    const pct = Math.abs(Number(metric.percentChange ?? metric.percentage ?? 0));
+    if (metric.isNewFromZero && Number(metric.value || 0) > 0) {
+      el.className = 'monthly-overview-badge is-new';
+      el.textContent = 'New';
+      return;
+    }
+    if (metric.direction === 'flat' || pct < 0.05) {
+      el.className = 'monthly-overview-badge is-flat';
+      el.textContent = 'No change';
+      return;
+    }
+    el.className = `monthly-overview-badge ${metric.direction === 'up' ? 'is-up' : 'is-down'}`;
+    el.textContent = `${metric.direction === 'up' ? '↑' : '↓'} ${pct.toFixed(1)}%`;
   }
 
   function renderAdminAnalyticsSection() {
@@ -1928,188 +1900,99 @@ export function createDashboard({
       filterInput,
       nowMs,
     });
+    window.__latestAnalyticsReport = report;
+    window.__latestAnalyticsFilter = filterInput;
 
     const s = report.summary;
-    const sales = report.salesAnalytics;
     const bestSellers = report.bestSellingProducts;
-    const ordAnalytics = report.orderAnalytics;
-    const custAnalytics = report.customerAnalytics;
-    const invAnalytics = report.inventoryAnalytics;
-    const vchAnalytics = report.voucherAnalytics;
 
-    const monthNames = [
-      'January',
-      'February',
-      'March',
-      'April',
-      'May',
-      'June',
-      'July',
-      'August',
-      'September',
-      'October',
-      'November',
-      'December',
-    ];
-    const overviewPeriodOptions = [];
-    for (let m = 12; m >= 1; m--) {
-      overviewPeriodOptions.push({
-        value: `2026-${String(m).padStart(2, '0')}`,
-        label: `${monthNames[m - 1]} 2026`,
-        selected: Number(report.period.year) === 2026 && Number(report.period.month) === m,
-      });
+    const setTxt = (id, val) => {
+      const el = document.getElementById(id);
+      if (el) el.textContent = val;
+    };
+    setTxt('analytics-active-period-label', report.period.label);
+    setTxt('analytics-period-start', report.period.startDate);
+    setTxt('analytics-period-end', report.period.endDate);
+
+    document.querySelectorAll('[data-analytics-preset]').forEach((btn) => {
+      btn.classList.toggle('is-active', btn.getAttribute('data-analytics-preset') === filterInput.preset);
+    });
+
+    const periodSelect = document.getElementById('analytics-overview-period-select');
+    if (periodSelect) {
+      const monthNames = [
+        'January',
+        'February',
+        'March',
+        'April',
+        'May',
+        'June',
+        'July',
+        'August',
+        'September',
+        'October',
+        'November',
+        'December',
+      ];
+      const opts = [];
+      for (let m = 12; m >= 1; m--) {
+        const val = `2026-${String(m).padStart(2, '0')}`;
+        const isSel = Number(report.period.year) === 2026 && Number(report.period.month) === m;
+        opts.push(createOption(val, `${monthNames[m - 1]} 2026`, isSel));
+      }
+      periodSelect.replaceChildren(...opts);
     }
 
-    const renderOverviewBadge = (metric) => {
-      if (!metric) return '';
-      const pct = Math.abs(Number(metric.percentChange ?? metric.percentage ?? 0));
-      if (metric.isNewFromZero && Number(metric.value || 0) > 0)
-        return `<span class="monthly-overview-badge is-new">New</span>`;
-      if (metric.direction === 'flat' || pct < 0.05)
-        return `<span class="monthly-overview-badge is-flat">No change</span>`;
-      return `<span class="monthly-overview-badge ${metric.direction === 'up' ? 'is-up' : 'is-down'}">${
-        metric.direction === 'up' ? '↑' : '↓'
-      } ${pct.toFixed(1)}%</span>`;
-    };
+    setTxt('analytics-kpi-rev-val', usd(s.totalRevenue.value));
+    applyOverviewMetricBadge('analytics-kpi-rev-badge', s.totalRevenue);
+    setTxt('analytics-kpi-ord-val', String(s.totalOrders.value));
+    applyOverviewMetricBadge('analytics-kpi-ord-badge', s.totalOrders);
+    setTxt('analytics-kpi-sold-val', String(s.totalProductsSold.value));
+    applyOverviewMetricBadge('analytics-kpi-sold-badge', s.totalProductsSold);
+    setTxt('analytics-kpi-cust-val', String(s.newCustomers.value));
+    applyOverviewMetricBadge('analytics-kpi-cust-badge', s.newCustomers);
 
-    analyticsEl.innerHTML = `<div class="space-y-6" data-testid="admin-analytics-module"><p class="text-sm text-slate-600">Sales reports include completed orders only, dated when the admin completed them. Deposits and unfinished or cancelled orders are excluded. Inventory and voucher availability remain live.</p><div class="analytics-report-banner"><div class="flex flex-col lg:flex-row lg:items-center justify-between gap-4"><div class="space-y-1.5"><h2 class="font-serif-display text-xl sm:text-2xl font-bold text-slate-900">Monthly Analytics &amp; Business Report — <span id="analytics-active-period-label" class="text-[#0077CC]">${esc(
-      report.period.label
-    )}</span></h2><p class="text-xs text-slate-700">Reporting Window: <strong class="font-mono-tech">${esc(
-      report.period.startDate
-    )}</strong> to <strong class="font-mono-tech">${esc(
-      report.period.endDate
-    )}</strong></p></div><div class="analytics-no-print flex flex-wrap items-center gap-2 shrink-0"><button type="button" id="analytics-export-pdf-btn" data-testid="analytics-export-pdf-btn" class="px-3.5 py-2 rounded-xl bg-[#0095FF] hover:bg-[#0077CC] text-white text-xs font-semibold cursor-pointer">Download PDF Report</button><button type="button" id="analytics-export-csv-btn" data-testid="analytics-export-csv-btn" class="px-3.5 py-2 rounded-xl bg-white border border-slate-300 text-xs font-semibold cursor-pointer">Export CSV</button><button type="button" id="analytics-print-report-btn" data-testid="analytics-print-report-btn" class="px-3.5 py-2 rounded-xl bg-white border border-slate-300 text-xs font-semibold cursor-pointer">Printable Report</button></div></div></div>
-      <div class="admin-card p-4 analytics-no-print flex flex-wrap items-center justify-between gap-3"><div class="flex flex-wrap items-center gap-1.5">${[
-        ['this_month', 'This Month'],
-        ['last_month', 'Last Month'],
-        ['select_month', 'Select Month & Year'],
-        ['this_year', 'This Year'],
-        ['custom_range', 'Custom Date Range'],
-      ]
-        .map(
-          ([key, label]) =>
-            `<button type="button" data-analytics-preset="${key}" class="analytics-preset-btn ${
-              filterInput.preset === key ? 'is-active' : ''
-            }">${label}</button>`
-        )
-        .join('')}</div><div class="flex items-center gap-2">${['2026-11', '2026-10', '2026-09']
-      .map(
-        (ym) =>
-          `<button type="button" data-analytics-quick-month="${ym}" class="px-2.5 py-1 rounded-lg border border-slate-200 font-mono-tech text-xs font-semibold cursor-pointer">${ym}</button>`
-      )
-      .join('')}</div></div>
-      <section aria-label="Monthly Business Summary Indicators" class="monthly-overview-shell" id="analytics-monthly-overview-section"><div class="monthly-overview-header"><div><h3 class="monthly-overview-title">Monthly overview</h3><p class="monthly-overview-subtitle">A clear view of your business performance</p></div><div class="monthly-overview-picker-wrap analytics-no-print"><select id="analytics-overview-period-select" data-testid="analytics-overview-period-select" class="monthly-overview-picker-select">${overviewPeriodOptions
-        .map((o) => `<option value="${esc(o.value)}" ${o.selected ? 'selected' : ''}>${esc(o.label)}</option>`)
-        .join('')}</select></div></div><div id="analytics-summary-kpi-grid" class="monthly-overview-kpi-grid" data-testid="analytics-summary-kpi-grid"><div class="monthly-overview-card is-featured" data-testid="kpi-total-revenue"><div class="monthly-overview-card-body"><p class="monthly-overview-card-label">Total revenue</p><div class="monthly-overview-value-row"><span class="monthly-overview-value is-blue">${usd(
-      s.totalRevenue.value
-    )}</span>${renderOverviewBadge(
-      s.totalRevenue
-    )}</div></div></div><div class="monthly-overview-card" data-testid="kpi-total-orders"><div class="monthly-overview-card-body"><p class="monthly-overview-card-label">Total orders</p><div class="monthly-overview-value-row"><span class="monthly-overview-value">${
-      s.totalOrders.value
-    }</span>${renderOverviewBadge(
-      s.totalOrders
-    )}</div></div></div><div class="monthly-overview-card" data-testid="kpi-products-sold"><div class="monthly-overview-card-body"><p class="monthly-overview-card-label">Products sold</p><div class="monthly-overview-value-row"><span class="monthly-overview-value">${
-      s.totalProductsSold.value
-    }</span>${renderOverviewBadge(
-      s.totalProductsSold
-    )}</div></div></div><div class="monthly-overview-card" data-testid="kpi-new-customers"><div class="monthly-overview-card-body"><p class="monthly-overview-card-label">New customers</p><div class="monthly-overview-value-row"><span class="monthly-overview-value">${
-      s.newCustomers.value
-    }</span>${renderOverviewBadge(
-      s.newCustomers
-    )}</div></div></div></div><div class="monthly-overview-middle-grid"><div class="monthly-overview-panel" data-testid="overview-revenue-trend-panel"><h4 class="monthly-overview-panel-title">Revenue trend (${esc(
-      report.period.label
-    )})</h4><p class="font-mono-tech text-lg font-bold text-[#0080FF] mt-2">${usd(
-      s.totalRevenue.value
-    )}</p></div><div class="monthly-overview-panel" data-testid="overview-order-status-panel"><h4 class="monthly-overview-panel-title">Order status</h4><div class="monthly-overview-status-list"><div class="monthly-overview-status-row" data-testid="kpi-completed-orders"><span>Completed</span><span class="monthly-overview-status-count">${
-      s.completedOrders.value
-    }</span></div><div class="monthly-overview-status-row" data-testid="kpi-pending-orders"><span>Pending</span><span class="monthly-overview-status-count">${
-      s.pendingOrders.value
-    }</span></div><div class="monthly-overview-status-row" data-testid="kpi-cancelled-orders"><span>Cancelled</span><span class="monthly-overview-status-count">${
-      s.cancelledOrders.value
-    }</span></div></div></div></div><div class="monthly-overview-bottom-grid"><div class="monthly-overview-card" data-testid="kpi-average-order-value"><div class="monthly-overview-card-body"><p class="monthly-overview-card-label">Average order value</p><span class="monthly-overview-value">${usd(
-      s.averageOrderValue.value
-    )}</span></div></div><div class="monthly-overview-card" data-testid="kpi-discounts-given"><div class="monthly-overview-card-body"><p class="monthly-overview-card-label">Discounts given</p><span class="monthly-overview-value">${usd(
-      s.totalDiscountsGiven.value
-    )}</span></div></div></div></section>
-      <section id="analytics-best-sellers-section" class="admin-card overflow-hidden"><div class="px-6 py-4 border-b border-slate-200"><h3 class="text-sm font-bold text-slate-900">Top 5 Best-Selling Products (${esc(
-        report.period.label
-      )})</h3></div><div class="overflow-x-auto"><table class="admin-table" id="analytics-best-sellers-table" data-testid="analytics-best-sellers-table"><thead><tr><th>Rank</th><th>Product</th><th>Category</th><th>Qty Sold</th><th>Total Revenue</th></tr></thead><tbody>${(
-      bestSellers.topFive || []
-    )
-      .map(
-        (item) =>
-          `<tr><td class="font-mono-tech font-bold">#${item.rank}</td><td><p class="admin-table-title">${esc(
-            item.name
-          )}</p></td><td>${esc(item.categoryName)}</td><td class="font-mono-tech font-bold">${
-            item.quantitySold
-          } units</td><td class="font-mono-tech font-bold text-[#0095FF]">${usd(item.totalRevenue)}</td></tr>`
-      )
-      .join('')}</tbody></table></div></section>
-      <section id="analytics-transactions-section" class="admin-card overflow-hidden"><div class="px-6 py-4 border-b border-slate-200 flex items-center justify-between"><h3 class="text-sm font-bold text-slate-900">Period Transaction Details (${esc(
-        report.period.label
-      )})</h3><span class="font-mono-tech text-xs font-bold">${
-      (report.transactions || []).length
-    } Transactions</span></div><div class="overflow-x-auto"><table class="admin-table" data-testid="analytics-transactions-table"><thead><tr><th>Order #</th><th>Date</th><th>Customer</th><th>Product</th><th>Status</th><th class="text-right">Realized Revenue</th></tr></thead><tbody>${(
-      report.transactions || []
-    )
-      .map(
-        (t) =>
-          `<tr><td class="font-mono-tech text-xs font-bold text-[#0095FF]">#${esc(
-            t.orderNumber
-          )}</td><td class="font-mono-tech text-xs">${esc(
-            t.reportDate || t.completedAt || t.orderDate
-          )}</td><td>${esc(t.clientName)}</td><td>${esc(t.furnitureName)}</td><td>${esc(
-            t.normalizedStatus
-          )}</td><td class="text-right font-mono-tech font-bold text-emerald-700">${usd(
-            t.realizedRevenue
-          )}</td></tr>`
-      )
-      .join('')}</tbody></table></div></section></div>`;
+    setTxt('analytics-rev-trend-title', `Revenue trend (${report.period.label})`);
+    setTxt('analytics-rev-trend-val', usd(s.totalRevenue.value));
+    setTxt('analytics-status-completed', String(s.completedOrders.value));
+    setTxt('analytics-status-pending', String(s.pendingOrders.value));
+    setTxt('analytics-status-cancelled', String(s.cancelledOrders.value));
+    setTxt('analytics-kpi-aov', usd(s.averageOrderValue.value));
+    setTxt('analytics-kpi-discounts', usd(s.totalDiscountsGiven.value));
 
-    analyticsEl.querySelectorAll('[data-analytics-preset]').forEach((btn) =>
-      btn.addEventListener('click', () => {
-        state.adminAnalyticsPreset = btn.getAttribute('data-analytics-preset') || 'this_month';
-        renderAdminAnalyticsSection();
-      })
-    );
-    analyticsEl.querySelectorAll('[data-analytics-quick-month]').forEach((btn) =>
-      btn.addEventListener('click', () => {
-        const [yStr, mStr] = (btn.getAttribute('data-analytics-quick-month') || '2026-11').split('-');
-        state.adminAnalyticsPreset = 'select_month';
-        state.adminAnalyticsYear = yStr;
-        state.adminAnalyticsMonth = String(Number(mStr));
-        renderAdminAnalyticsSection();
-      })
-    );
-    document.getElementById('analytics-overview-period-select')?.addEventListener('change', (e) => {
-      const [yStr, mStr] = String(e.target.value || '2026-11').split('-');
-      state.adminAnalyticsPreset = 'select_month';
-      state.adminAnalyticsYear = yStr;
-      state.adminAnalyticsMonth = String(Number(mStr));
-      renderAdminAnalyticsSection();
-    });
-    document.getElementById('analytics-export-pdf-btn')?.addEventListener('click', () => {
-      const pdfBytes = buildAnalyticsPdfBytes(report);
-      const url = URL.createObjectURL(new Blob([pdfBytes], { type: 'application/pdf' }));
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `lillia-rowena-analytics-${String(report.period.label).toLowerCase().replace(/[^a-z0-9]+/g, '-')}.pdf`;
-      a.click();
-      showAdminBanner(`Downloaded PDF Report for ${report.period.label}.`);
-    });
-    document.getElementById('analytics-export-csv-btn')?.addEventListener('click', async () => {
-      let csvText = '';
-      const serverCsv = await syncDatabaseStore('export_analytics_csv', { filterInput });
-      if (serverCsv?.ok && serverCsv.csv) csvText = serverCsv.csv;
-      else csvText = buildAnalyticsCsvContent(report);
-      const url = URL.createObjectURL(new Blob([csvText], { type: 'text/csv;charset=utf-8;' }));
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `lillia-rowena-analytics-${String(report.period.label).toLowerCase().replace(/[^a-z0-9]+/g, '-')}.csv`;
-      a.click();
-      showAdminBanner(`Exported CSV Report for ${report.period.label}.`);
-    });
-    document.getElementById('analytics-print-report-btn')?.addEventListener('click', () => window.print());
+    setTxt('analytics-bestsellers-heading', `Top 5 Best-Selling Products (${report.period.label})`);
+    const bsTbody = document.getElementById('analytics-best-sellers-tbody');
+    if (bsTbody) {
+      const rows = (bestSellers.topFive || []).map((item) => {
+        const tr = cloneTpl('tpl-analytics-bestseller-row');
+        if (!tr) return document.createElement('tr');
+        setRole(tr, 'bs-rank', `#${item.rank}`);
+        setRole(tr, 'bs-name', item.name);
+        setRole(tr, 'bs-cat', item.categoryName);
+        setRole(tr, 'bs-qty', `${item.quantitySold} units`);
+        setRole(tr, 'bs-rev', usd(item.totalRevenue));
+        return tr;
+      });
+      bsTbody.replaceChildren(...rows);
+    }
+
+    setTxt('analytics-tx-heading', `Period Transaction Details (${report.period.label})`);
+    setTxt('analytics-tx-count', `${(report.transactions || []).length} Transactions`);
+    const txTbody = document.getElementById('analytics-transactions-tbody');
+    if (txTbody) {
+      const rows = (report.transactions || []).map((t) => {
+        const tr = cloneTpl('tpl-analytics-tx-row');
+        if (!tr) return document.createElement('tr');
+        setRole(tr, 'atx-num', `#${t.orderNumber}`);
+        setRole(tr, 'atx-date', t.reportDate || t.completedAt || t.orderDate);
+        setRole(tr, 'atx-client', t.clientName);
+        setRole(tr, 'atx-prod', t.furnitureName);
+        setRole(tr, 'atx-status', t.normalizedStatus);
+        setRole(tr, 'atx-rev', usd(t.realizedRevenue));
+        return tr;
+      });
+      txTbody.replaceChildren(...rows);
+    }
   }
 
   return { initDashboardPage };
