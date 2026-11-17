@@ -5,8 +5,7 @@ declare(strict_types=1);
 /**
  * PDO Database REST API Endpoint (src/api.php) — Lillia and Rowena Furniture
  * Connects to MySQL 8.0.16+ (`lillia_rowena_furniture`) via PHP PDO (`Library\Database`)
- * and stores all application state (`products`, `materials`, `inventoryTransactions`, `vouchers`,
- * `orders`, `customerProfile`, `customers`, `offers`, `sessionUser`, `cartItems`) on the server side.
+ * and processes all business logic, calculations, validations, and persistence on the server side.
  */
 
 require_once __DIR__ . '/../config/bootstrap.php';
@@ -23,6 +22,7 @@ header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
 
 $db = Database::getInstance();
 $productModel = new Product($db);
+$userModel = new User($db);
 $analyticsModel = new AnalyticsReport($db, $productModel);
 $method = strtoupper((string) ($_SERVER['REQUEST_METHOD'] ?? 'GET'));
 
@@ -42,6 +42,11 @@ try {
         } elseif (!isset($store['cartItems'])) {
             $store['cartItems'] = [];
         }
+        $store['customerDirectory'] = $userModel->computeCustomerDirectory(
+            isset($store['orders']) && is_array($store['orders']) ? $store['orders'] : [],
+            isset($store['customers']) && is_array($store['customers']) ? $store['customers'] : [],
+            isset($store['customerProfile']) && is_array($store['customerProfile']) ? $store['customerProfile'] : null
+        );
         $store['_dbMeta'] = [
             'driver'         => 'pdo_mysql',
             'endpoint'       => 'src/api.php',
@@ -77,7 +82,119 @@ try {
                 }
                 $filterInput = isset($payload['filter']) && is_array($payload['filter']) ? $payload['filter'] : $payload;
                 $report = $analyticsModel->generateReport($filterInput);
-                echo json_encode($report, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
+                echo json_encode(['ok' => true, 'report' => $report], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
+                exit;
+
+            case 'export_analytics_csv':
+                $filterInput = isset($payload['filter']) && is_array($payload['filter']) ? $payload['filter'] : $payload;
+                $report = $analyticsModel->generateReport($filterInput);
+                $csv = $analyticsModel->buildCsvContent($report);
+                echo json_encode([
+                    'ok'       => true,
+                    'csv'      => $csv,
+                    'fileName' => 'Lillia_Rowena_Analytics_Report_' . ($report['dateRange']['startDate'] ?? date('Y-m-d')) . '.csv',
+                ], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
+                exit;
+
+            case 'place_order':
+                $result = $productModel->placeCartOrder($payload);
+                echo json_encode([
+                    'ok'            => true,
+                    'action'        => 'place_order',
+                    'createdOrders' => $result['createdOrders'],
+                    'pricing'       => $result['pricing'],
+                    'store'         => $result['store'],
+                ], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
+                exit;
+
+            case 'create_custom_order':
+                $result = $productModel->createCustomOrder($payload);
+                echo json_encode([
+                    'ok'     => true,
+                    'action' => 'create_custom_order',
+                    'order'  => $result['order'],
+                    'store'  => $result['store'],
+                ], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
+                exit;
+
+            case 'update_order_status':
+                $orderNumber = (string) ($payload['orderNumber'] ?? $payload['orderId'] ?? '');
+                $updatedOrder = $productModel->updateOrderStatus($orderNumber, $payload);
+                $updatedStore = $db->readStore();
+                echo json_encode([
+                    'ok'     => true,
+                    'action' => 'update_order_status',
+                    'order'  => $updatedOrder,
+                    'orders' => $updatedStore['orders'] ?? [],
+                ], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
+                exit;
+
+            case 'request_order_cancellation':
+                $orderNumber = (string) ($payload['orderNumber'] ?? $payload['orderId'] ?? '');
+                $updatedOrder = $productModel->requestOrderCancellation($orderNumber);
+                $updatedStore = $db->readStore();
+                echo json_encode([
+                    'ok'     => true,
+                    'action' => 'request_order_cancellation',
+                    'order'  => $updatedOrder,
+                    'orders' => $updatedStore['orders'] ?? [],
+                ], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
+                exit;
+
+            case 'resolve_order_cancellation':
+                $orderNumber = (string) ($payload['orderNumber'] ?? $payload['orderId'] ?? '');
+                $decision = (string) ($payload['decision'] ?? 'approve');
+                $updatedOrder = $productModel->resolveOrderCancellation($orderNumber, $decision);
+                $updatedStore = $db->readStore();
+                echo json_encode([
+                    'ok'     => true,
+                    'action' => 'resolve_order_cancellation',
+                    'order'  => $updatedOrder,
+                    'orders' => $updatedStore['orders'] ?? [],
+                ], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
+                exit;
+
+            case 'record_order_payment':
+                $orderNumber = (string) ($payload['orderNumber'] ?? $payload['orderId'] ?? '');
+                $paymentMethod = (string) ($payload['paymentMethod'] ?? 'Credit / Debit Card');
+                $updatedOrder = $productModel->recordOrderPayment($orderNumber, $paymentMethod);
+                $updatedStore = $db->readStore();
+                echo json_encode([
+                    'ok'     => true,
+                    'action' => 'record_order_payment',
+                    'order'  => $updatedOrder,
+                    'orders' => $updatedStore['orders'] ?? [],
+                ], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
+                exit;
+
+            case 'record_stock_movement':
+                $result = $productModel->applyMaterialStockMovement($payload);
+                echo json_encode(array_merge(['ok' => true, 'action' => 'record_stock_movement'], $result), JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
+                exit;
+
+            case 'update_customer_profile':
+                $profileInput = isset($payload['customerProfile']) && is_array($payload['customerProfile']) ? $payload['customerProfile'] : $payload;
+                $updatedProfile = $userModel->updateCustomerProfile($profileInput);
+                $updatedStore = $db->readStore();
+                echo json_encode([
+                    'ok'              => true,
+                    'action'          => 'update_customer_profile',
+                    'customerProfile' => $updatedProfile,
+                    'customers'       => $updatedStore['customers'] ?? [],
+                    'sessionUser'     => $updatedStore['sessionUser'] ?? null,
+                ], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
+                exit;
+
+            case 'create_offer':
+                $offerInput = isset($payload['offer']) && is_array($payload['offer']) ? $payload['offer'] : $payload;
+                $createdOffer = $productModel->validateAndCreateOffer($offerInput);
+                $updatedStore = $db->readStore();
+                echo json_encode([
+                    'ok'     => true,
+                    'action' => 'create_offer',
+                    'offer'  => $createdOffer,
+                    'offers' => $updatedStore['offers'] ?? [],
+                ], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
                 exit;
 
             case 'create_voucher':
@@ -206,18 +323,20 @@ try {
 
             case 'save_product':
                 $product = $payload['product'] ?? null;
-                if (is_array($product) && !empty($product['id'])) {
+                if (is_array($product)) {
+                    $validatedProduct = $productModel->createOrUpdateProduct($product);
+                    $mergedProduct = array_merge($product, $validatedProduct);
                     $products = isset($store['products']) && is_array($store['products']) ? $store['products'] : [];
                     $updated = false;
                     foreach ($products as $idx => $existing) {
-                        if (($existing['id'] ?? '') === $product['id']) {
-                            $products[$idx] = array_merge($existing, $product);
+                        if (($existing['id'] ?? '') === $mergedProduct['id']) {
+                            $products[$idx] = array_merge($existing, $mergedProduct);
                             $updated = true;
                             break;
                         }
                     }
                     if (!$updated) {
-                        array_unshift($products, $product);
+                        array_unshift($products, $mergedProduct);
                     }
                     $store['products'] = array_values($products);
                     $db->writeStore($store);
@@ -235,10 +354,7 @@ try {
                             break;
                         }
                     }
-                    $store['products'] = array_values(array_filter(
-                        $products,
-                        static fn(array $p): bool => (string) ($p['id'] ?? '') !== $productId
-                    ));
+                    $store['products'] = $productModel->removeProduct($products, $productId);
                     if (isset($payload['vouchers']) && is_array($payload['vouchers'])) {
                         $store['vouchers'] = $productModel->normalizeVouchersStatus($payload['vouchers']);
                     }
@@ -257,7 +373,8 @@ try {
                 if (isset($payload['materials']) && is_array($payload['materials'])) {
                     $store['materials'] = $payload['materials'];
                 } elseif (isset($payload['material']) && is_array($payload['material'])) {
-                    $mat = $payload['material'];
+                    $validatedMat = $productModel->createOrUpdateMaterial($payload['material']);
+                    $mat = array_merge($payload['material'], $validatedMat);
                     $materials = isset($store['materials']) && is_array($store['materials']) ? $store['materials'] : [];
                     $found = false;
                     foreach ($materials as $idx => $m) {
@@ -301,14 +418,13 @@ try {
                     try {
                         $db->query('DELETE FROM Material WHERE MaterialName = :name', [':name' => $removedMatName]);
                     } catch (\Throwable) {
-                        // Keep foreign-key referenced material rows intact if referenced by Order_Item_Material
+                        // Keep foreign-key referenced material rows intact
                     }
                 }
                 $db->writeStore($store);
                 break;
 
             case 'login_user':
-                $userModel = new User($db);
                 $roleParam = trim((string) ($payload['role'] ?? 'Customer'));
                 $expectedRole = strcasecmp($roleParam, 'admin') === 0 ? 'Admin' : 'Customer';
                 $authenticated = $userModel->authenticate(
@@ -348,7 +464,6 @@ try {
                 exit;
 
             case 'register_customer':
-                $userModel = new User($db);
                 $registered = $userModel->register([
                     'fullName'    => $payload['fullName'] ?? $payload['name'] ?? '',
                     'email'       => $payload['email'] ?? '',
